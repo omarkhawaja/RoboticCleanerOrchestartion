@@ -22,7 +22,8 @@ from .hal.base import (
     TRAVEL_BATTERY_PCT,
     TRAVEL_MINUTES,
     WATER_CYCLE_MINUTES,
-    CHARGE_FULL_MINUTES,
+    CHARGE_DISPATCH_TARGET_PCT,
+    charge_minutes_to_target,
 )
 from .models import RobotSpec, RobotStatus, Telemetry, Zone, ZoneStatus, fmt_time
 from .scheduler import Assignment
@@ -261,9 +262,17 @@ class RobotController:
         self.adapter.phys.position = DOCK
         battery = self.adapter.phys.battery_pct
         water = self.adapter.phys.water_pct
-        need_charge = battery < 98.0
+        # Redeploy at CHARGE_DISPATCH_TARGET_PCT (90%), not 100%: charging
+        # follows a CC/CV curve (see hal/base.py), so the last 10% -- the CV
+        # taper -- costs roughly 2x the time the first 90% did. Waiting out
+        # that taper is a bad trade against 78 percentage points of usable
+        # battery (90% down to the BATTERY_RETURN_PCT=12% floor) being
+        # plenty for another cleaning run, and freeing the robot up sooner
+        # buys back schedule slack for exactly the kind of disruption this
+        # system needs to absorb. See SPEC.md for the before/after numbers.
+        need_charge = battery < CHARGE_DISPATCH_TARGET_PCT - 2.0
         need_water = water is not None and water < 90.0
-        charge_min = (100.0 - battery) * (CHARGE_FULL_MINUTES / 100.0) if need_charge else 0.0
+        charge_min = charge_minutes_to_target(battery, CHARGE_DISPATCH_TARGET_PCT) if need_charge else 0.0
         water_min = WATER_CYCLE_MINUTES if need_water else 0.0
         duration = max(charge_min, water_min, 1.0)
         self.adapter.set_internal_status(RobotStatus.DOCK_SERVICE)

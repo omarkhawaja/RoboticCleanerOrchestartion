@@ -10,6 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fleet_orchestrator import facility, replanner
 from fleet_orchestrator.dispatcher import FleetDispatcher
+from fleet_orchestrator.hal.base import (
+    CHARGE_CC_LIMIT_PCT,
+    CHARGE_DISPATCH_TARGET_PCT,
+    charge_minutes_to_target,
+    charge_pct_after,
+)
 from fleet_orchestrator.hal.floorbot import bucket_to_minutes_range, pct_to_bucket
 from fleet_orchestrator.hal.registry import build_adapter
 from fleet_orchestrator.models import OEM, RobotStatus
@@ -132,6 +138,60 @@ class TestDualConstraint(unittest.TestCase):
             min_water_seen = min(min_water_seen, telem.water_pct)
         self.assertGreaterEqual(min_water_seen, 0.0)
         self.assertGreater(dispatcher.controller("R-001").stats["water_cycles"], 0)
+
+
+class TestChargingCurve(unittest.TestCase):
+    """Charging follows a two-phase CC/CV curve (fast to 90%, slow taper to
+    100%), and the Dispatcher's dock-service policy targets 90%, not 100%."""
+
+    def test_cc_phase_reaches_90_in_30_minutes(self):
+        self.assertAlmostEqual(charge_pct_after(0.0, 30.0), CHARGE_CC_LIMIT_PCT, places=6)
+
+    def test_cv_phase_reaches_100_in_60_more_minutes(self):
+        pct = charge_pct_after(CHARGE_CC_LIMIT_PCT, 60.0)
+        self.assertAlmostEqual(pct, 100.0, places=6)
+
+    def test_full_charge_is_still_90_minutes_total(self):
+        self.assertAlmostEqual(charge_pct_after(0.0, 90.0), 100.0, places=6)
+
+    def test_cv_phase_is_much_slower_than_cc_phase(self):
+        # same 10 percentage points, compare time cost on each side of 90%
+        cc_10pts = charge_minutes_to_target(0.0, 10.0)
+        cv_10pts = charge_minutes_to_target(90.0, 100.0)
+        self.assertGreater(cv_10pts, 5 * cc_10pts)  # CV is ~18x slower, assert a loose bound
+
+    def test_single_tick_straddling_90_percent_uses_both_rates(self):
+        # start 2 min of CC room short of 90%, advance 5 min -> crosses into CV
+        start = CHARGE_CC_LIMIT_PCT - 2 * (CHARGE_CC_LIMIT_PCT / 30.0)  # 2 min of CC room
+        pct = charge_pct_after(start, 5.0)
+        naive_cc_only = start + 5.0 * (CHARGE_CC_LIMIT_PCT / 30.0)
+        self.assertLess(pct, naive_cc_only)  # slower once past 90%, not still at the CC rate
+
+    def test_dispatcher_redeploys_at_90_not_100(self):
+        fleet = {"R-005": facility.build_fleet()["R-005"]}  # dry robot: charge is the only constraint
+        zones = {"Z1": facility.build_zones()["Z1"]}
+        schedule = {"R-005": [Assignment("Z1", "R-005", 0, 500.0)]}
+        monitor = Monitor(fleet)
+        rng = random.Random(1)
+        adapters = {"R-005": build_adapter(fleet["R-005"])}
+        dispatcher = FleetDispatcher(fleet, adapters, schedule, zones, monitor, replanner, rng)
+        saw_dock_service = False
+        redeploy_battery = None
+        for _ in range(500):
+            dispatcher.step()
+            ctrl = dispatcher.controller("R-005")
+            if ctrl.phase == "DOCK_SERVICE":
+                saw_dock_service = True
+            elif saw_dock_service and ctrl.phase != "DOCK_SERVICE" and redeploy_battery is None:
+                redeploy_battery = ctrl.adapter.status_query().battery_pct
+                break
+        self.assertTrue(saw_dock_service)
+        self.assertIsNotNone(redeploy_battery)
+        # left the dock around 90% (minus the flat 2% travel debit already
+        # applied by the time this reads), not chased up toward 100% --
+        # under the old target-100% policy this would read ~98%.
+        self.assertGreaterEqual(redeploy_battery, 85.0)
+        self.assertLess(redeploy_battery, 95.0)
 
 
 class TestReplanner(unittest.TestCase):

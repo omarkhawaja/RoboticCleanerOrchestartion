@@ -74,7 +74,66 @@ just re-scheduled, the single highest-leverage hardware change would be a
 bigger water tank on the AutoScrub/FloorBot units, not a bigger battery --
 battery is already sized well past what the schedule ever asks of it.
 
-## 3. Heuristic scheduler, not an ILP/CP-SAT solver
+## 3. Charging is not linear -- redeploy at 90%, not 100%
+
+The assignment gives one number for charging: "90 minutes, 0% to 100%."
+The first implementation took that literally -- a flat rate, 1.11%/min,
+the whole way. That's not how Li-ion packs actually charge, and it was
+worth fixing because the difference isn't cosmetic.
+
+**Real lithium-ion charging is two-phase (CC/CV):** constant current (CC)
+up to roughly 90%, fast, followed by a constant-voltage (CV) taper for the
+last 10% that's deliberately slow -- the charger drops current as the
+pack approaches full to avoid overvoltage, and that taper is *why* the
+last 10% takes so long. Applied to the assignment's 90-minute total: the
+0-90% CC phase takes about 1/3 of the total (**30 min**, ~3.0%/min), and
+the 90-100% CV phase eats the other 2/3 (**60 min**, ~0.17%/min) --
+roughly an 18x slowdown for the last stretch. This is implemented as a
+genuine piecewise curve, not a lookup table: `hal/base.py`'s
+`charge_pct_after()` / `charge_minutes_to_target()` integrate the CC and
+CV segments correctly even when a single charging stop straddles the 90%
+boundary.
+
+**Dispatch policy changed to match:** robots now redeploy once they hit
+`CHARGE_DISPATCH_TARGET_PCT = 90%` instead of waiting for 100%
+(`dispatcher.py::_arrive_at_dock`). The cost is real but small -- 90% down
+to the `BATTERY_RETURN_PCT = 12%` forced-return floor is still 78 usable
+percentage points per cycle, a robot rarely burns that much in one zone
+run. The benefit is not small: skipping the CV tail means skipping the
+majority of what a full charge actually costs in time.
+
+**Measured, not assumed** -- re-running the same two studies from #2 with
+the new curve and policy:
+
+| | old (linear, target 100%) | new (CC/CV curve, target 90%) |
+|---|---|---|
+| Mean slack (140-shift study) | 137.2 min | **170.8 min** (+33.6 min, +24%) |
+| R-008 dock stop (Tue trace) | 30 min | **10 min** |
+| R-001 dock stop (Tue trace) | 36 min | **10 min** |
+| R-003 dock stop (Tue trace) | 49 min | **15 min** |
+| Last zone finished (Tue trace) | 04:46 AM | **04:08 AM** (38 min earlier) |
+| Water-vs-battery split, coverage | unchanged (100% water, 0% missed) | unchanged |
+
+The water-vs-battery finding from #2 doesn't change -- water is still the
+binding constraint on every single dock return, because this policy only
+touches *how long* a charge-inclusive stop takes, not *whether* one
+happens (that's still triggered by water). What changes is that every
+stop is shorter, which is exactly the "room for interruptions/delays"
+outcome intuited going in: ~34 extra minutes of fleet-wide slack per shift
+is schedule margin that's now available to absorb a disruption instead of
+being spent trickle-charging batteries nobody was about to run out of.
+
+**Why 90% and not some other threshold, and why not adaptive?** 90% is
+the natural boundary the CC/CV curve itself provides -- it's where the
+charging rate cliffs, so it's the target that captures "all of the fast
+phase, none of the slow one." A fancier policy could vary the target based
+on how much schedule slack remains (top off further when there's nothing
+better to do, stop earlier under time pressure); that's a reasonable
+future refinement, deliberately not built here to keep the policy a
+single named constant with an obvious justification rather than another
+tunable heuristic layered on top of the scheduler's existing ones.
+
+## 4. Heuristic scheduler, not an ILP/CP-SAT solver
 
 8 robots x 8 zones is small enough that a real constraint solver (OR-Tools
 CP-SAT, e.g.) would find a provably-optimal assignment in milliseconds, and
@@ -89,7 +148,7 @@ soft preferences (minimize robot-hours, balance wear across the fleet).
   thinking over polish -- a heuristic I can fully explain in the 30-minute
   walkthrough is worth more here than a solver I'd have to hand-wave past.
 - The **Dispatcher is the actual source of truth for water/battery timing**
-  (see #4) -- the scheduler only needs to prove a plan is *plausible*, not
+  (see #5) -- the scheduler only needs to prove a plan is *plausible*, not
   compute exact break timing, which shrinks the problem a solver would need
   to solve anyway.
 - Tradeoff accepted: the heuristic can leave value on the table (e.g. it
@@ -97,7 +156,7 @@ soft preferences (minimize robot-hours, balance wear across the fleet).
   is a rounding error; it would not scale to hundreds of zones without a
   real solver.
 
-## 4. The scheduler plans; the Dispatcher decides when cycles actually happen
+## 5. The scheduler plans; the Dispatcher decides when cycles actually happen
 
 The scheduler produces a *plan* (who cleans what, roughly when, with a 20%
 time buffer for cycle overhead as a feasibility check). It **deliberately
@@ -117,7 +176,7 @@ buffer), so it will occasionally accept a zone that later needs a second,
 unplanned-for cycle and runs past its window -- that shows up honestly as
 `PARTIAL` in the shift report rather than being hidden.
 
-## 5. Shared per-zone progress pool for multi-robot zones
+## 6. Shared per-zone progress pool for multi-robot zones
 
 When two robots are assigned to the same zone (e.g. a large zone under
 time pressure), they draw down **one shared remaining-sqft counter**, not
@@ -133,7 +192,7 @@ that a solver would never introduce (it reasons about the whole assignment
 at once) but a greedy per-robot heuristic can, and is worth naming
 explicitly rather than papering over.
 
-## 6. FloorBot water uncertainty: conservative, not aggressive
+## 7. FloorBot water uncertainty: conservative, not aggressive
 
 FloorBot's coarse 4-bucket water reporting (`high/med/low/empty`) means a
 "low" reading covers a wide true range (roughly 8-33% of tank capacity,
@@ -155,7 +214,7 @@ confirm a leak. The assignment's own "What Will Impress Us" section calls
 this exact tradeoff out, so the choice and its cost are made explicit here
 rather than left implicit in a threshold constant.
 
-## 7. Scripted vs. emergent disruptions in the demo
+## 8. Scripted vs. emergent disruptions in the demo
 
 Two of the five required disruptions emerge **organically** from the
 simulated physics with zero scripting: R-001 running its water tank dry
@@ -184,7 +243,7 @@ instead fires the WS-drop during whichever CleanPath robot's actual
 cleaning window it falls in, which is the more honest way to exercise the
 same mechanism.
 
-## 8. R-001 vs. R-006 to the offline garage (Z8)
+## 9. R-001 vs. R-006 to the offline garage (Z8)
 
 The assignment brief is internally inconsistent here: Section 3's bullet
 list says *"R-001 is dispatched to Z8,"* but the detailed sample-timeline
@@ -196,7 +255,7 @@ specific and names the OEM), so this system's scheduler prefers hard-scrub
 capable robots for the concrete garage floor, which in practice assigns a
 FloorBot. This ambiguity is called out here rather than silently resolved.
 
-## 9. No LLM component
+## 10. No LLM component
 
 Per the assignment: *"If you use LLMs for any component, explain what they
 handle vs. deterministic code."* This system uses **no LLM anywhere** --
@@ -220,14 +279,14 @@ handling) is deterministic threshold/rule-based code. Reasons:
   of an otherwise-untouched decision layer, and the assignment says
   explicitly that production UI isn't part of what's being evaluated.
 
-## 10. ML for scheduling optimization
+## 11. ML for scheduling optimization
 
 Not used. The fleet/zone count (8 and 8) doesn't benefit from a learned
 model over a simple heuristic or solver, and there's no training data (a
 single simulated night) to learn from responsibly. The one place ML is
-explicitly designed for but not implemented is anomaly detection (see #11).
+explicitly designed for but not implemented is anomaly detection (see #12).
 
-## 11. Anomaly detection: threshold-based now, ML-shaped data model
+## 12. Anomaly detection: threshold-based now, ML-shaped data model
 
 Per the rubric: *"Threshold-based is fine, but design the telemetry data
 model so ML-based anomaly detection could be added later."* `Monitor`
@@ -239,7 +298,7 @@ drain-rate or leak classifier. The threshold checks in
 model call; swapping them out would not require touching the schema, only
 the function body.
 
-## 12. Persistence granularity: shift-boundary, not mid-tick
+## 13. Persistence granularity: shift-boundary, not mid-tick
 
 Per the rubric: *"State must persist across restarts."* This orchestrator
 is a nightly batch scheduler -- the realistic restart scenario is "the
@@ -260,19 +319,23 @@ Dispatcher) wasn't justified by the assignment's 6-8 hour scope for a
 failure mode (mid-shift process crash) that's a small fraction of the
 realistic restart cases.
 
-## 13. Robot simulator fidelity
+## 14. Robot simulator fidelity
 
 Travel between zones is modeled as a flat cost (5 min, 2% battery) per the
 spec, applied once at the start of a transition rather than drained
 per-minute, because the assignment specifies it as a flat transition cost,
-not a rate. Charging is linear (0-100% in 90 min, matching the spec
-exactly). Water refill is a fixed 10-minute cycle regardless of starting
-level (also per spec -- "dump + refill," not proportional to how empty the
-tank was). Security escort delay is modeled as `random.uniform(0, 10)`
-minutes for any zone entry after 23:00, seeded for reproducibility, with
-the Z5 disruption overriding it to a forced 25 minutes for that one event.
+not a rate. Charging follows a two-phase CC/CV curve rather than a flat
+rate, and the dock-service policy targets 90% rather than 100% -- see #3
+for the full rationale and measured impact. Water refill is a fixed
+10-minute cycle regardless of starting level (per spec -- "dump + refill,"
+not proportional to how empty the tank was; unlike charging, the
+assignment doesn't suggest water refill has a comparable slow-taper
+physical mechanism, so it stays flat-rate). Security escort delay is
+modeled as `random.uniform(0, 10)` minutes for any zone entry after 23:00,
+seeded for reproducibility, with the Z5 disruption overriding it to a
+forced 25 minutes for that one event.
 
-## 14. What's intentionally not handled
+## 15. What's intentionally not handled
 
 Per the rubric's own "What We Don't Care About": no production UI (this is
 a CLI + JSON), no real OEM API integration (all three are simulated), and

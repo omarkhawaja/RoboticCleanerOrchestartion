@@ -31,7 +31,59 @@ TRAVEL_MINUTES = 5
 TRAVEL_BATTERY_PCT = 2.0
 WATER_CYCLE_MINUTES = 10.0
 SANITIZE_MINUTES = 15.0
-CHARGE_FULL_MINUTES = 90.0  # 0% -> 100%
+
+# Charging is NOT linear. Real Li-ion packs charge in two phases: constant
+# current (CC) up to ~90%, fast, then constant voltage (CV) trickle-taper
+# for the last 10%, slow -- tapering current is *how* CV charging avoids
+# overvoltage damage near full, and that taper is what makes the last 10%
+# disproportionately slow. The assignment's "90 minutes, 0% -> 100%" figure
+# is the total, but that time is not spent evenly across the curve: getting
+# to 90% takes ~1/3 of the total (30 min), the last 10% takes the other
+# ~2/3 (60 min) -- so the CC phase runs ~18x faster (%/min) than the CV
+# phase. See SPEC.md for the dispatch-policy implication (redeploy at 90%,
+# don't wait out the CV tail) and hal/base.py's charge_pct_after /
+# charge_minutes_to_target for the piecewise math.
+CHARGE_FULL_MINUTES = 90.0     # 0% -> 100%, total, for reference/back-compat
+CHARGE_CC_LIMIT_PCT = 90.0     # boundary between the fast (CC) and slow (CV) phases
+CHARGE_CC_MINUTES = 30.0       # time to go 0% -> 90% (the fast phase)
+CHARGE_CV_MINUTES = 60.0       # time to go 90% -> 100% (the slow taper)
+CHARGE_CC_RATE = CHARGE_CC_LIMIT_PCT / CHARGE_CC_MINUTES              # %/min, ~3.0
+CHARGE_CV_RATE = (100.0 - CHARGE_CC_LIMIT_PCT) / CHARGE_CV_MINUTES    # %/min, ~0.167
+
+# Dispatch policy: redeploy once the fast CC phase is done rather than
+# waiting out the slow CV taper for the last 10%. See SPEC.md #N.
+CHARGE_DISPATCH_TARGET_PCT = 90.0
+
+
+def charge_pct_after(start_pct: float, minutes: float) -> float:
+    """Battery % after charging for `minutes` from `start_pct`, following
+    the piecewise CC/CV curve. Used by PhysicalState.advance() so a single
+    tick that straddles the 90% boundary still charges at the right rate
+    on each side of it, not one rate blended across both."""
+    pct = start_pct
+    remaining = minutes
+    if pct < CHARGE_CC_LIMIT_PCT and remaining > 0:
+        cc_room_min = (CHARGE_CC_LIMIT_PCT - pct) / CHARGE_CC_RATE
+        if remaining <= cc_room_min:
+            return min(100.0, pct + CHARGE_CC_RATE * remaining)
+        pct = CHARGE_CC_LIMIT_PCT
+        remaining -= cc_room_min
+    if remaining > 0:
+        pct = min(100.0, pct + CHARGE_CV_RATE * remaining)
+    return pct
+
+
+def charge_minutes_to_target(start_pct: float, target_pct: float) -> float:
+    """Minutes of charging needed to go from `start_pct` to `target_pct`
+    along the same piecewise CC/CV curve. Inverse of charge_pct_after,
+    used by the Dispatcher to size a dock-service stop."""
+    if target_pct <= start_pct:
+        return 0.0
+    cc_start, cc_end = min(start_pct, CHARGE_CC_LIMIT_PCT), min(target_pct, CHARGE_CC_LIMIT_PCT)
+    cc_time = max(0.0, cc_end - cc_start) / CHARGE_CC_RATE
+    cv_start, cv_end = max(start_pct, CHARGE_CC_LIMIT_PCT), max(target_pct, CHARGE_CC_LIMIT_PCT)
+    cv_time = max(0.0, cv_end - cv_start) / CHARGE_CV_RATE
+    return cc_time + cv_time
 
 
 @dataclass
@@ -72,7 +124,7 @@ class PhysicalState:
         elif self.status == RobotStatus.EN_ROUTE:
             pass  # travel cost is a flat debit applied once at transition (see Dispatcher), not per-minute
         elif self.status == RobotStatus.CHARGING:
-            self.battery_pct = min(100.0, self.battery_pct + (100.0 / CHARGE_FULL_MINUTES) * minutes)
+            self.battery_pct = charge_pct_after(self.battery_pct, minutes)
         elif self.status == RobotStatus.WATER_CYCLE:
             if self.water_pct is not None:
                 self.water_pct = min(100.0, self.water_pct + (100.0 / WATER_CYCLE_MINUTES) * minutes)
@@ -80,7 +132,7 @@ class PhysicalState:
             # charging and water refill happen concurrently at the dock --
             # "a water stop may be combined with a battery top-up ... but
             # they are independent constraints" (each proceeds at its own rate)
-            self.battery_pct = min(100.0, self.battery_pct + (100.0 / CHARGE_FULL_MINUTES) * minutes)
+            self.battery_pct = charge_pct_after(self.battery_pct, minutes)
             if self.water_pct is not None:
                 self.water_pct = min(100.0, self.water_pct + (100.0 / WATER_CYCLE_MINUTES) * minutes)
         # IDLE / SANITIZING / ESCORT_WAIT / OFFLINE_MISSION(cleaning handled by

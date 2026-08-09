@@ -144,9 +144,11 @@ Run `python main.py` for the full narrative and report.
 
 Kept out of this README on purpose -- see **[SPEC.md](SPEC.md)** for the
 full discussion of: the objective function and the 140-shift empirical
-study backing it (water binds 100% of the time, battery never does), why
-the scheduler is a greedy heuristic instead of an ILP solver, the FloorBot
-water-uncertainty policy (conservative vs. aggressive), scripted vs.
-emergent disruptions, the persistence granularity tradeoff, why no LLM
-component was used, and every place the assignment brief was ambiguous
+study backing it (water binds 100% of the time, battery never does), the
+non-linear CC/CV charging curve and the redeploy-at-90% dispatch policy it
+justifies (+24% fleet-wide schedule slack, measured), why the scheduler is
+a greedy heuristic instead of an ILP solver, the FloorBot water-uncertainty
+policy (conservative vs. aggressive), scripted vs. emergent disruptions,
+the persistence granularity tradeoff, why no LLM component was used, and
+every place the assignment brief was ambiguous
 and what assumption was made.
