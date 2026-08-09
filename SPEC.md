@@ -635,7 +635,45 @@ right) is what caught a real bug," which is a more useful thing to be
 able to say in a walkthrough than a system that's never been checked that
 closely.
 
-## 19. What's intentionally not handled
+## 19. Verifying the facility data actually matches the spec, not just asserting it does
+
+Raised as a direct question: does the simulation's zone/window/day data
+really match the given facility spec, and why does the weekly reports'
+"Allocated" column show a flat 12 hours every single day regardless of
+which zones are scheduled?
+
+**The zone data was re-verified field by field, fresh, not just
+re-asserted.** Every zone's sqft, floor type, classification, window
+start/end, day-restriction, and WiFi flag is now locked in by
+`tests/test_basic.py::TestFacilitySpecMatchesImage`
+(`test_every_zone_field_matches_the_spec_image_exactly`), so a future
+change to `facility.py` that silently drifts from the given spec fails a
+test instead of going unnoticed. Companion tests confirm Z4 runs only
+Mon/Wed/Fri, Z8 only Tue/Sat, and every other zone runs all 7 days --
+exactly the pattern in the facility notes.
+
+**The flat 12-hour "Allocated" figure is correct, not a bug -- but it was
+hiding real day-to-day variation that's worth surfacing.** The
+assignment defines the shift itself as a fixed operating window --
+*"Simulate one night shift (7:00 PM - 7:00 AM)"* -- a given constant
+independent of which zones happen to be active that night, so a report
+showing 12h every day is accurately reflecting that constant, not a
+scheduling artifact. What genuinely *does* vary by day is which zones
+are active and how many window-hours they collectively represent, and
+the reports weren't surfacing that number anywhere, which is exactly
+what made the flat 12h look suspicious even though it was right.
+`analysis/facility_week_report.py`'s weekly summary now has a second,
+clearly-labeled column, **Zone-Window Demand** (sum of every scheduled
+zone's own window duration that night), which does vary as expected:
+41h on Mon/Wed/Fri (Z4 active), 49h on Tue/Sat (Z8's 12h "anytime"
+window active), 37h on Thu/Sun (neither). Locked in by
+`test_zone_window_demand_varies_by_day_unlike_shift_capacity` and
+`test_shift_capacity_is_the_fixed_12h_night_shift_from_the_brief` --
+two tests that check the DIFFERENCE in behavior between the constant
+(shift capacity) and the variable (zone-window demand) explicitly,
+rather than just checking one number in isolation.
+
+## 20. What's intentionally not handled
 
 Per the rubric's own "What We Don't Care About": no production UI (this is
 a CLI + JSON), no real OEM API integration (all three are simulated), and

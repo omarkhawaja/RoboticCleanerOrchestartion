@@ -122,6 +122,95 @@ class TestScheduler(unittest.TestCase):
                     self.assertNotEqual(zones[a.zone_id].classification, "Sterile")
 
 
+class TestFacilitySpecMatchesImage(unittest.TestCase):
+    """Locks in every zone's sqft/floor/classification/window/day-pattern
+    against the facility spec image, field by field, so a future change to
+    facility.py can't silently drift from the given data without a test
+    failing here. H = 60 (one hour in minutes), matching facility.py's own
+    convention, so window values below read the same way the spec does."""
+
+    H = 60
+
+    EXPECTED = {
+        # zone_id: (sqft, floor, classification, window_start, window_end, days)
+        "Z1": (20_000, "Hard", "High-traffic", 2 * H, 11 * H, None),          # 9:00 PM - 6:00 AM daily
+        "Z2": (3_800, "Hard", "Sterile", 8 * H, 10 * H, None),                 # 3:00 AM - 5:00 AM daily
+        "Z3": (2_600, "Mixed", "Standard", 3 * H, 10 * H, None),               # 10:00 PM - 5:00 AM daily
+        "Z4": (5_100, "Carpet", "Standard", 0, 4 * H, ["Mon", "Wed", "Fri"]),  # 7:00 PM - 11:00 PM, Mon/Wed/Fri
+        "Z5": (6_400, "Hard", "Sterile", 6 * H, 10 * H, None),                 # 1:00 AM - 5:00 AM daily
+        "Z6": (4_800, "Hard", "Standard", 1 * H, 11 * H, None),                # 8:00 PM - 6:00 AM daily
+        "Z7": (2_200, "Hard", "Sterile", 4 * H, 9 * H, None),                  # 11:00 PM - 4:00 AM daily
+        "Z8": (12_000, "Concrete", "Standard", 0, 12 * H, ["Tue", "Sat"]),     # Anytime, 2x/week (Tue/Sat)
+    }
+
+    def test_every_zone_field_matches_the_spec_image_exactly(self):
+        zones = facility.build_zones()
+        self.assertEqual(set(zones.keys()), set(self.EXPECTED.keys()), "zone set itself doesn't match the spec")
+        for zid, (sqft, floor, cls, wstart, wend, days) in self.EXPECTED.items():
+            z = zones[zid]
+            self.assertEqual(z.sqft, sqft, f"{zid} sqft")
+            self.assertEqual(z.floor_type.value, floor, f"{zid} floor type")
+            self.assertEqual(z.classification, cls, f"{zid} classification")
+            self.assertEqual(z.window_start, wstart, f"{zid} window_start")
+            self.assertEqual(z.window_end, wend, f"{zid} window_end")
+            self.assertEqual(z.days, days, f"{zid} days restriction")
+
+    def test_z8_has_no_wifi_per_facility_notes(self):
+        self.assertFalse(facility.build_zones()["Z8"].wifi)
+
+    def test_z8_scheduled_only_tuesday_and_saturday(self):
+        zones = facility.build_zones()
+        for day in ["Mon", "Wed", "Thu", "Fri", "Sun"]:
+            self.assertFalse(zones["Z8"].scheduled_today(day), f"Z8 should NOT run on {day}")
+        for day in ["Tue", "Sat"]:
+            self.assertTrue(zones["Z8"].scheduled_today(day), f"Z8 should run on {day}")
+
+    def test_z4_scheduled_only_mon_wed_fri(self):
+        zones = facility.build_zones()
+        for day in ["Tue", "Thu", "Sat", "Sun"]:
+            self.assertFalse(zones["Z4"].scheduled_today(day), f"Z4 should NOT run on {day}")
+        for day in ["Mon", "Wed", "Fri"]:
+            self.assertTrue(zones["Z4"].scheduled_today(day), f"Z4 should run on {day}")
+
+    def test_daily_zones_run_every_day_of_the_week(self):
+        zones = facility.build_zones()
+        for zid in ["Z1", "Z2", "Z3", "Z5", "Z6", "Z7"]:
+            for day in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]:
+                self.assertTrue(zones[zid].scheduled_today(day), f"{zid} should run every day, missing {day}")
+
+    def test_shift_capacity_is_the_fixed_12h_night_shift_from_the_brief(self):
+        """The assignment defines the shift itself as a fixed window --
+        "Simulate one night shift (7:00 PM - 7:00 AM)" -- independent of
+        which zones happen to be active. That's WHY the weekly reports'
+        'Allocated (shift)' column is a constant 720 min every day: it's
+        not derived from zone data, it's a given operating-hours constant.
+        What DOES vary by day is which zones are active and how many
+        window-hours they collectively represent -- see
+        analysis/facility_week_report.py's 'Zone-Window Demand' column
+        (added specifically to make that day-to-day variation visible,
+        since the constant shift-capacity number alone doesn't show it)."""
+        from analysis.facility_week_report import SHIFT_CAPACITY_MIN
+        self.assertEqual(SHIFT_CAPACITY_MIN, 12 * 60)
+
+    def test_zone_window_demand_varies_by_day_unlike_shift_capacity(self):
+        """The thing that's actually supposed to vary day-to-day: total
+        window-hours of the zones scheduled that night. Tuesday (has Z8's
+        12h anytime window) and Thursday (has neither Z4 nor Z8) should
+        NOT show the same number, even though both show the same 12h
+        fixed shift capacity."""
+        zones = facility.build_zones()
+
+        def window_demand_hours(day):
+            return sum((z.window_end - z.window_start) / 60.0 for z in zones.values() if z.scheduled_today(day))
+
+        tue_demand = window_demand_hours("Tue")
+        thu_demand = window_demand_hours("Thu")
+        mon_demand = window_demand_hours("Mon")
+        self.assertNotEqual(tue_demand, thu_demand)
+        self.assertNotEqual(mon_demand, thu_demand)
+        self.assertGreater(tue_demand, thu_demand)  # Z8 alone adds 12h of window demand
+
+
 class TestSanitization(unittest.TestCase):
     """Dock is a non-sterile area, so a sterile-certified robot's very
     first zone of the night must trigger a sanitization cycle if that

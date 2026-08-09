@@ -126,7 +126,13 @@ def main():
     print("\n" + "=" * 100)
     print("WEEKLY SUMMARY -- facility-wide, per day")
     print("=" * 100)
-    header2 = f"{'Day':<6}{'Zones today':>13}{'Cleaned %':>12}{'Time Taken':>14}{'Allocated':>11}{'Delta':>10}"
+    print("  'Allocated (shift)' is the fixed 19:00-07:00 operating window from the assignment's own")
+    print("  'simulate one night shift' spec -- a given constant, correctly the same every night, NOT")
+    print("  derived from zone data. 'Zone-Window Demand' IS derived from zone data and DOES vary by")
+    print("  day -- the sum of every scheduled zone's own window duration that night (Z8's 12h 'anytime'")
+    print("  window alone is why Tue/Sat run higher than the rest).\n")
+    header2 = (f"{'Day':<6}{'Zones today':>13}{'Cleaned %':>12}{'Time Taken':>14}"
+               f"{'Allocated (shift)':>19}{'Zone-Window Demand':>21}{'Delta':>10}")
     print(header2)
     print("-" * len(header2))
     for day in WEEKDAYS:
@@ -140,11 +146,13 @@ def main():
                         if z.zone_id in monitor.zones and monitor.zones[z.zone_id].last_cleaned_t is not None]
         finish_min = max(finish_times) if finish_times else 0
         allocated_h = SHIFT_CAPACITY_MIN / 60.0
+        window_demand_h = sum((z.window_end - z.window_start) / 60.0 for z in scheduled_today)
         taken_h = finish_min / 60.0
         delta_h = allocated_h - taken_h
         taken_str = f"{taken_h:.2f}h ({fmt_time(finish_min)})"
         delta_str = f"+{delta_h:.2f}h" if delta_h >= 0 else f"{delta_h:.2f}h"
-        print(f"{day:<6}{len(scheduled_today):>13}{cleaned_pct:>11.1f}%{taken_str:>19}{allocated_h:>9.2f}h{delta_str:>10}")
+        print(f"{day:<6}{len(scheduled_today):>13}{cleaned_pct:>11.1f}%{taken_str:>19}"
+              f"{allocated_h:>16.2f}h{window_demand_h:>18.2f}h{delta_str:>10}")
 
     print("\n  'Cleaned %' is sqft-weighted across every zone scheduled that day (Z4 excluded Tue/Thu/")
     print("  Sat/Sun, Z8 excluded Mon/Wed/Thu/Fri/Sun -- per the facility's own cleaning-day pattern).")
