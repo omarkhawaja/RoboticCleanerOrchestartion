@@ -195,6 +195,7 @@
         <button data-speed="90">90×</button>
       </div>
       <button class="btn" id="resetBtn">↺ Reset</button>
+      <button class="btn" id="weekBtn">📅 Run Full Week</button>
     </div>
   </header>
 
@@ -251,6 +252,28 @@
     </div>
   </div>
 
+  <div class="panel" id="weekPanel" style="display:none; margin-bottom:16px">
+    <div class="panel-head">
+      <h2>Full Week Results &mdash; Mon&ndash;Sun (headless run, baseline, no injected disruptions)</h2>
+      <span class="count" id="weekPanelCount"></span>
+    </div>
+    <div style="overflow-x:auto; padding:4px 14px 14px">
+      <table id="weekTable" style="width:100%; border-collapse:collapse; font-family:var(--font-hud); font-size:12px">
+        <thead>
+          <tr style="text-align:left; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.04em; font-size:10.5px">
+            <th style="padding:6px 10px 6px 0">Day</th>
+            <th style="padding:6px 10px">Zones scheduled</th>
+            <th style="padding:6px 10px">Cleaned %</th>
+            <th style="padding:6px 10px">Time taken</th>
+            <th style="padding:6px 10px">Allocated</th>
+            <th style="padding:6px 10px">Delta / tolerance</th>
+          </tr>
+        </thead>
+        <tbody id="weekTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="footnote">
     Standalone browser simulation &mdash; its own simplified JS scheduler/physics, not a replay of the Python system.<br/>
     Same concepts as the full submission: dual battery+water constraints, capability-gated zones, real-time re-planning. See <a href="#" onclick="return false">README.md / SPEC.md</a> for the full design.
@@ -265,16 +288,24 @@
 const MIN_PER_SHIFT = 720; // 19:00 -> 07:00
 const DOCK = {x:500, y:330};
 
+const WEEK_DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+let currentDay = "Tue";  // which day-of-week the interactive single-night view is showing
+
 const ZONES = [
   {id:"Z1", name:"Main Lobby",        sqft:20000, floor:"hard",     cls:"traffic", wStart:120, wEnd:660, x:60,  y:500, w:370, h:160, wifi:true},
   {id:"Z2", name:"ED Hallways",       sqft:3800,  floor:"hard",     cls:"sterile", wStart:480, wEnd:600, x:360, y:60,  w:200, h:110, wifi:true},
   {id:"Z3", name:"Cafeteria",         sqft:2600,  floor:"mixed",    cls:"standard",wStart:180, wEnd:600, x:680, y:280, w:220, h:150, wifi:true},
-  {id:"Z4", name:"Admin Wing",        sqft:5100,  floor:"carpet",   cls:"standard",wStart:0,   wEnd:240, x:460, y:520, w:220, h:130, wifi:true, days:"MWF only — idle tonight"},
+  {id:"Z4", name:"Admin Wing",        sqft:5100,  floor:"carpet",   cls:"standard",wStart:0,   wEnd:240, x:460, y:520, w:220, h:130, wifi:true, days:["Mon","Wed","Fri"], daysLabel:"Mon/Wed/Fri only"},
   {id:"Z5", name:"Patient Halls 2F",  sqft:6400,  floor:"hard",     cls:"sterile", wStart:360, wEnd:600, x:590, y:60,  w:230, h:110, wifi:true},
   {id:"Z6", name:"Outpatient Wing",   sqft:4800,  floor:"hard",     cls:"standard",wStart:60,  wEnd:660, x:80,  y:280, w:240, h:180, wifi:true},
   {id:"Z7", name:"Radiology Suite",   sqft:2200,  floor:"hard",     cls:"sterile", wStart:240, wEnd:540, x:150, y:60,  w:180, h:110, wifi:true},
-  {id:"Z8", name:"Parking Garage L1", sqft:12000, floor:"concrete", cls:"standard",wStart:0,   wEnd:720, x:720, y:520, w:240, h:130, wifi:false},
+  {id:"Z8", name:"Parking Garage L1", sqft:12000, floor:"concrete", cls:"standard",wStart:0,   wEnd:720, x:720, y:520, w:240, h:130, wifi:false, days:["Tue","Sat"], daysLabel:"Tue/Sat only"},
 ];
+
+// per the facility spec: no `days` field = cleaned every day
+function scheduledToday(zoneDef, day){
+  return !zoneDef.days || zoneDef.days.includes(day);
+}
 
 const FLEET = [
   {id:"R-001", oem:"AutoScrub", model:"AS-900",  coverage:8000, battH:4.0, waterH:1.5, caps:["hard_scrub"], sterile:false},
@@ -315,9 +346,11 @@ function pctToBucket(pct){
 
 let state = null;
 
-function freshState(){
+function freshState(day){
+  day = day || currentDay;
   const zones = {};
-  ZONES.forEach(z => zones[z.id] = {def:z, remaining:z.sqft, pct:0, status: z.days ? "not-scheduled" : "pending"});
+  ZONES.forEach(z => zones[z.id] = {def:z, remaining:z.sqft, pct:0,
+    status: scheduledToday(z, day) ? "pending" : "not-scheduled"});
 
   const robots = {};
   FLEET.forEach(r => {
@@ -331,14 +364,15 @@ function freshState(){
   });
 
   return {
-    t:0, playing:false, speed:30, lastFrame:null, acc:0,
+    t:0, playing:false, speed:30, lastFrame:null, acc:0, day,
     zones, robots, log:[], failUsed:false, adhocUsed:false, adhocZone:null, adhocDeadline:null,
   };
 }
 
 /* --------- simple scheduler: build each robot's ordered zone queue --------- */
-function buildSchedule(st){
-  const zoneList = Object.values(st.zones).map(z=>z.def).filter(z=>!z.days);
+function buildSchedule(st, day){
+  day = day || currentDay;
+  const zoneList = Object.values(st.zones).map(z=>z.def).filter(z=>scheduledToday(z, day));
   const rank = z => [z.cls==="sterile"?0:1, z.cls==="traffic"?0:1, z.wEnd, z.wStart];
   zoneList.sort((a,b)=>{
     const ra=rank(a), rb=rank(b);
@@ -430,6 +464,13 @@ function stepRobot(st, rid){
   }
 
   if(r.phase==="dock"){
+    // charge and (if applicable) water refill concurrently, each at its
+    // own rate -- this was previously just counting down a correctly-sized
+    // timer without ever actually applying the gain, so a robot would sit
+    // at the dock for the right number of minutes and leave exactly as
+    // depleted as it arrived, needing another stop almost immediately.
+    r.battery = Math.min(100, r.battery + 100/CHARGE_FULL_MIN);
+    if(r.water!==null) r.water = Math.min(100, r.water + 100/WATER_CYCLE_MIN);
     r.phaseTimer--;
     if(r.phaseTimer<=0){
       r.status="idle";
@@ -454,7 +495,7 @@ function beginTravel(st, r, zoneId, dest){
 function arriveZone(st, r){
   const zone = st.zones[r.zone].def;
   const afterHour = st.t >= 240;
-  const wait = afterHour ? (seedRandom(r.id+"|"+Math.floor(st.t/40))*10) : 0;
+  const wait = afterHour ? (seedRandom(st.day+"|"+r.id+"|"+Math.floor(st.t/40))*10) : 0;
   if(wait>0.4){
     r.phase="escort"; r.phaseTimer=wait; r.status="escort wait";
     log(st, `${r.def.id} security escort wait ${wait.toFixed(1)}m at ${zone.id}`);
@@ -464,9 +505,11 @@ function arriveZone(st, r){
 }
 
 function beginClean(st, r){
-  const zone = st.zones[r.zone].def;
+  const zEntry = st.zones[r.zone];
+  const zone = zEntry.def;
   r.phase="clean"; r.status="cleaning";
   r.lastClass = zone.cls==="sterile";
+  if(zEntry.startedAt === undefined) zEntry.startedAt = st.t;  // first robot to touch this zone tonight
   if(!zone.wifi) { r.offlineMission = true; log(st, `${r.def.id} OFFLINE MISSION handoff at ${zone.id} (no WiFi) — running preloaded plan`); }
 }
 
@@ -477,6 +520,7 @@ function stepClean(st, r){
   if(st.t >= zone.wEnd){
     const pct = zEntry.pct;
     zEntry.status = pct>2 ? "partial" : "missed";
+    zEntry.finishedAt = st.t;  // window ran out -- this is when we stopped, whether done or not
     log(st, `${zone.id} window closed at ${pct.toFixed(0)}% — ${zEntry.status.toUpperCase()}`, pct>2?"warn":"crit");
     finishTask(st, r);
     return;
@@ -511,7 +555,7 @@ function stepClean(st, r){
   zEntry.pct = 100*(1 - zEntry.remaining/zone.sqft);
 
   if(zEntry.remaining<=0){
-    zEntry.status="complete"; zEntry.pct=100;
+    zEntry.status="complete"; zEntry.pct=100; zEntry.finishedAt=st.t;
     log(st, `${zone.id} complete`, "ok");
     if(r.offlineMission){ log(st, `${r.def.id} reconnects, reconciling offline telemetry`); r.offlineMission=false; }
     finishTask(st, r);
@@ -603,7 +647,7 @@ function draw(st){
 
 function drawZone(st, z){
   const d = z.def;
-  const notScheduled = d.days;
+  const notScheduled = z.status === "not-scheduled";
   ctx.save();
 
   // base (dirty) rect
@@ -648,7 +692,7 @@ function drawZone(st, z){
 
   ctx.font = "10.5px ui-monospace, monospace";
   ctx.fillStyle = "rgba(231,237,245,0.45)";
-  const sub = notScheduled ? d.days : `${d.sqft.toLocaleString()} ft² · ${fmtTime(d.wStart)}–${fmtTime(d.wEnd)}`;
+  const sub = notScheduled ? (d.daysLabel || "not scheduled today") : `${d.sqft.toLocaleString()} ft² · ${fmtTime(d.wStart)}–${fmtTime(d.wEnd)}`;
   ctx.fillText(sub, d.x+10, d.y+27);
 
   if(d.cls==="sterile"){
@@ -798,7 +842,7 @@ function renderZoneList(st){
   el.innerHTML="";
   let done=0, total=0;
   Object.values(st.zones).forEach(z=>{
-    if(z.def.days) return;
+    if(z.status === "not-scheduled") return;
     total++;
     if(z.status==="complete") done++;
     const colors = {pending:"var(--off)", "at-risk":"var(--dirty)", partial:"var(--warn)", missed:"var(--dirty)", complete:"var(--clean)"};
@@ -822,7 +866,7 @@ function escapeHtml(s){ return s.replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;","
 function renderClock(st){
   document.getElementById("clockTime").textContent = fmtTime(st.t).replace("+1d","");
   const hour = (st.t/60).toFixed(1);
-  document.getElementById("clockDay").textContent = `Tue · shift hour ${hour}/12${st.t>=MIN_PER_SHIFT?" · SHIFT COMPLETE":""}`;
+  document.getElementById("clockDay").textContent = `${currentDay} · shift hour ${hour}/12${st.t>=MIN_PER_SHIFT?" · SHIFT COMPLETE":""}`;
   document.getElementById("shiftProgress").style.width = Math.min(100, 100*st.t/MIN_PER_SHIFT)+"%";
 }
 
@@ -859,8 +903,78 @@ function frame(ts){
   requestAnimationFrame(frame);
 }
 
+/* ============================== FULL WEEK (headless) ============================== */
+// Runs all 7 real weekdays back-to-back, instantly (no animation pacing --
+// this is the same tick()/stepRobot() engine the interactive view uses,
+// just driven in a tight loop instead of once per requestAnimationFrame),
+// so Z4 (Mon/Wed/Fri only) and Z8 (Tue/Sat only) each get exercised on
+// their actual scheduled nights, matching the facility's own cleaning-day
+// pattern -- not just the single Tuesday the interactive view defaults to.
+function runHeadlessDay(day){
+  const st = freshState(day);
+  buildSchedule(st, day);
+  let guard = 0;
+  while(st.t < MIN_PER_SHIFT && guard < MIN_PER_SHIFT + 10){ tick(st); guard++; }
+
+  let totalSqft = 0, cleanedSqft = 0, lastFinish = 0, zonesScheduled = 0, zonesComplete = 0;
+  Object.values(st.zones).forEach(z=>{
+    if(z.status === "not-scheduled") return;
+    zonesScheduled++;
+    if(z.status === "complete") zonesComplete++;
+    totalSqft += z.def.sqft;
+    cleanedSqft += z.def.sqft * (z.pct/100);
+    if(z.finishedAt !== undefined) lastFinish = Math.max(lastFinish, z.finishedAt);
+  });
+  const cleanedPct = totalSqft > 0 ? 100 * cleanedSqft / totalSqft : 0;
+  return {
+    day, zonesScheduled, zonesComplete, cleanedPct,
+    timeTakenMin: lastFinish, allocatedMin: MIN_PER_SHIFT, deltaMin: MIN_PER_SHIFT - lastFinish,
+    finalState: st,
+  };
+}
+
+function renderWeekTable(results){
+  const body = document.getElementById("weekTableBody");
+  body.innerHTML = results.map(r=>{
+    const deltaColor = r.deltaMin >= 0 ? "var(--clean)" : "var(--dirty)";
+    const deltaStr = (r.deltaMin >= 0 ? "+" : "") + (r.deltaMin/60).toFixed(2) + "h";
+    return `<tr style="border-top:1px solid var(--line-soft)">
+      <td style="padding:7px 10px 7px 0; font-weight:600">${r.day}</td>
+      <td style="padding:7px 10px">${r.zonesComplete}/${r.zonesScheduled} complete</td>
+      <td style="padding:7px 10px">${r.cleanedPct.toFixed(1)}%</td>
+      <td style="padding:7px 10px">${(r.timeTakenMin/60).toFixed(2)}h (${fmtTime(r.timeTakenMin)})</td>
+      <td style="padding:7px 10px">${(r.allocatedMin/60).toFixed(2)}h</td>
+      <td style="padding:7px 10px; color:${deltaColor}; font-weight:600">${deltaStr}</td>
+    </tr>`;
+  }).join("");
+  const meanCleaned = results.reduce((a,r)=>a+r.cleanedPct,0)/results.length;
+  document.getElementById("weekPanelCount").textContent =
+    `${results.length} days simulated · mean cleaned ${meanCleaned.toFixed(1)}%`;
+  document.getElementById("weekPanel").style.display = "";
+}
+
+function runFullWeek(){
+  const results = WEEK_DAYS.map(runHeadlessDay);
+  renderWeekTable(results);
+
+  // leave the interactive canvas showing the last simulated night (Sun)
+  // rather than a blank/stale view
+  const last = results[results.length - 1];
+  currentDay = last.day;
+  state = last.finalState;
+  state.playing = false;
+  state.lastFrame = null;
+  document.getElementById("playBtn").textContent = "▶ Play";
+  draw(state); renderClock(state); renderRoster(state); renderZoneList(state);
+  log(state, `Full week simulated (Mon–Sun). Results table below. Canvas now showing ${last.day}.`, "ok");
+
+  document.getElementById("weekPanel").scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
 /* ============================== INIT / CONTROLS ============================== */
 function init(){
+  currentDay = "Tue";  // Reset always returns to the single-night Tuesday demo
+  document.getElementById("weekPanel").style.display = "none";
   state = freshState();
   buildSchedule(state);
   log(state, "Schedule generated. Zones assigned by capability, window, and dual-constraint feasibility.");
@@ -874,6 +988,7 @@ document.getElementById("playBtn").addEventListener("click", ()=>{
   document.getElementById("playBtn").textContent = state.playing ? "⏸ Pause" : "▶ Play";
 });
 document.getElementById("resetBtn").addEventListener("click", init);
+document.getElementById("weekBtn").addEventListener("click", runFullWeek);
 document.getElementById("btnFail").addEventListener("click", ()=>injectFailure(state));
 document.getElementById("btnAdhoc").addEventListener("click", ()=>injectAdhoc(state));
 document.querySelectorAll("#speedGroup button").forEach(btn=>{
