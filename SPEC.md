@@ -156,24 +156,35 @@ though a dock round trip is the cleanest possible case of pure transport
 mode -- deck fully raised and stowed, a known repeated route, nothing to
 clean along the way.
 
-**Change made:** `TRAVEL_MINUTES_DOCK = 3.0` (down from the baseline
-`TRAVEL_MINUTES = 5.0`) now applies specifically to the zone->dock and
-dock->zone legs of a service trip (`dispatcher.py::_begin_dock_return` and
-the DOCK_SERVICE resume path), a ~40% reduction. The baseline 5-minute
-figure is left untouched for ordinary zone-to-zone dispatch, since that's
-an explicit assignment-given constant ("5 minutes... per transition") and
-there's no comparable hard evidence for treating that specific leg as
-faster -- extending the speed differential further than the case it's
-actually documented for would be overreaching past what's justified.
+**Change made:** `TRAVEL_MINUTES_DOCK` now applies specifically to the
+zone->dock and dock->zone legs of a service trip
+(`dispatcher.py::_begin_dock_return` and the DOCK_SERVICE resume path).
+The baseline 5-minute figure is left untouched for ordinary zone-to-zone
+dispatch, since that's an explicit assignment-given constant ("5
+minutes... per transition") and there's no comparable evidence for
+treating that specific leg as faster -- extending the speed differential
+past the case it's actually justified for would be overreaching.
 
-**Why 40% and not some other number?** No AS-900-specific transport-vs-
-scrubbing speed ratio was available, so this is an estimate pinned to the
-general behavior of the machine class (traction-drive auto-scrubbers),
-not a vendor spec value -- called out here explicitly rather than
-presented as more precise than it is. Battery cost per transition
-(`TRAVEL_BATTERY_PCT`) is left unchanged: higher speed plausibly draws
-more current over a similar distance, so there's no basis for assuming
-transport mode is also more energy-efficient, only faster.
+**The number: a 50% speed increase, not a 50% time cut.** Speed and time
+are inverses at constant distance -- a 1.5x speed multiplier means
+`time / 1.5`, not `time * 0.5`:
+
+```
+TRAVEL_MINUTES_DOCK = TRAVEL_MINUTES / 1.5 = 5 / 1.5 = 3.33... min
+```
+
+Rounded to **3 minutes** to match this simulator's discrete 1-minute tick
+resolution (a fractional target would otherwise silently round *up* to
+the next whole tick under a naive countdown-by-1 loop -- 3.33 would
+actually cost 4 simulated minutes, not 3.33, an artifact worth catching
+rather than shipping quietly). No AS-900-specific transport-vs-scrubbing
+speed ratio is vendor-published; 50% is a stated assumption pinned to the
+general behavior of this machine class, not a spec value, and is called
+out as such rather than presented as more precise than it is. Battery
+cost per transition (`TRAVEL_BATTERY_PCT`) is left unchanged: higher
+speed plausibly draws more current over a similar distance, so there's no
+basis for assuming transport mode is also more energy-efficient, only
+faster.
 
 **Measured impact, stacked on top of #3's charging change:** re-running
 the 140-shift study with both changes in place, mean fleet-wide slack
@@ -183,8 +194,31 @@ before either change). Smaller than the charging curve's effect -- a dock
 round trip is a few minutes either way, a CV taper was tens of minutes --
 but it's the same direction and it's free: no coverage or safety margin
 given up for it (0 partial/missed zones across all 140 shifts, unchanged).
-Single-day trace example: the Tuesday demo's last zone finish moves from
-04:08 AM (charging change only) to **04:04 AM** (both changes).
+
+**Day-by-day operational tolerance, both changes combined:**
+`analysis/daily_tolerance_table.py` simulates consecutive calendar days
+(cycling real weekdays, distinct random seed per day, no injected
+disruptions) and reports, per day, how long the facility actually took to
+clean vs. the fixed 720-minute (12h) allocated shift window -- the delta
+is the schedule margin available that day for an unplanned delay. Across
+28 simulated days (4 full weeks, every weekday's zone mix repeated 4x):
+
+| Metric | Value |
+|---|---|
+| Days with full coverage | 28/28 |
+| Mean time to clean facility | 547.4 min (9.12 h) |
+| Allocated capacity (fixed) | 720 min (12.00 h) |
+| **Mean tolerance/delta** | **172.6 min (2.88 h)** |
+| Tightest day observed | 166.0 min (2.77 h) |
+| Most slack observed | 181.0 min (3.02 h) |
+| stdev | 4.6 min |
+
+That ~2.8-3.0 hour band, consistent across every day type, is the number
+to actually plan an SLA or a maintenance/escalation window around -- not
+a best-case number from a lucky night, a worst-case number that scares
+everyone, or a scripted-disruption number that isn't representative of a
+normal shift. Run `python -m analysis.daily_tolerance_table [n_days]` to
+regenerate for a different sample size or inspect the day-by-day rows.
 
 ## 5. Heuristic scheduler, not an ILP/CP-SAT solver
 

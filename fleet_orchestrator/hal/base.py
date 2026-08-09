@@ -39,18 +39,25 @@ SANITIZE_MINUTES = 15.0
 # exists so the brushes get enough dwell time and the squeegee has time to
 # fully dry the floor, not because the drivetrain can't go faster. A
 # dock-service round trip (heading back for water/battery, and the return
-# leg once serviced) is the clearest case of pure transport-mode travel:
-# deck fully raised and stowed, a known/repeated route, nothing to clean
-# along the way. We model that leg faster than the assignment's baseline
-# 5-minute transition -- assumed here at a ~40% reduction (a mid-range
-# figure for transport-vs-working speed caps on this class of machine;
-# not vendor-specified for AS-900 exactly, so treated as an estimate, not
-# a spec value). Battery cost per transition is left unchanged (still
+# leg once serviced, back to wherever the robot left off) is the clearest
+# case of pure transport-mode travel: deck fully raised and stowed, a
+# known/repeated route, nothing to clean along the way.
+#
+# Assumption: transport mode is a 50% SPEED increase over the baseline
+# travel speed -- a speed multiplier (1.5x), not a flat time cut. At
+# constant distance, time = distance / speed, so a 1.5x speed increase
+# means time * (1/1.5), not time * 0.5:
+#     TRAVEL_MINUTES / 1.5 = 5 / 1.5 = 3.33... minutes
+# Rounded to the nearest whole minute -- this simulator advances in
+# discrete 1-minute ticks, so a fractional target would silently round UP
+# to the next full tick anyway (3.33 would actually cost 4 simulated
+# minutes, not 3.33, under a naive countdown-by-1-per-tick loop) -- giving
+# 3 minutes. Battery cost per transition is left unchanged (still
 # TRAVEL_BATTERY_PCT) since higher speed plausibly draws more current over
 # the same-ish distance -- there's no data suggesting transport mode is
 # more energy-efficient at the pack level, only faster. See SPEC.md for
 # the reasoning and the before/after schedule-slack numbers.
-TRAVEL_MINUTES_DOCK = 3.0    # dock <-> zone leg specifically (transport mode both ways)
+TRAVEL_MINUTES_DOCK = round(TRAVEL_MINUTES / 1.5)  # = 3; dock <-> checkpoint leg, both directions
 
 # Charging is NOT linear. Real Li-ion packs charge in two phases: constant
 # current (CC) up to ~90%, fast, then constant voltage (CV) trickle-taper
