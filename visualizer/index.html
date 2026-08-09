@@ -1,0 +1,889 @@
+<title>MBody Fleet — Night Shift Simulator</title>
+<style>
+  :root{
+    --bg: #0a0e14;
+    --bg-2: #0d131b;
+    --panel: #101823;
+    --panel-2: #0c121a;
+    --line: #1e2b3a;
+    --line-soft: #172230;
+    --ink: #e7edf5;
+    --ink-dim: #90a0b4;
+    --ink-faint: #556678;
+    --accent: #45d9ff;
+    --accent-dim: #1c5570;
+    --dirty: #d9564f;
+    --clean: #34c17a;
+    --water: #4fa3ff;
+    --warn: #f2b23c;
+    --sterile: #b98af0;
+    --off: #4a5566;
+    --oem-autoscrub: #5eb1ff;
+    --oem-cleanpath: #c792ea;
+    --oem-floorbot: #ffb454;
+    --font-hud: ui-monospace, "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+    --font-body: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  }
+  /* Deliberately single-theme: this is a night-shift ops console — the kind
+     of screen that lives in a dim control room and is always dark, the way
+     a security monitor or NOC wall display is. The zone/robot palette below
+     is tuned specifically against this dark ground. */
+
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:
+      radial-gradient(1200px 600px at 15% -10%, #10202c 0%, transparent 60%),
+      var(--bg);
+    color:var(--ink);
+    font-family:var(--font-body);
+    -webkit-font-smoothing:antialiased;
+    min-height:100vh;
+  }
+  ::selection{background:var(--accent-dim);color:#fff}
+  button:focus-visible, .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  .wrap{max-width:1440px;margin:0 auto;padding:18px 20px 28px}
+
+  /* ---------- header ---------- */
+  header{
+    display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+    padding:14px 18px;border:1px solid var(--line);border-radius:10px;
+    background:linear-gradient(180deg,var(--panel),var(--panel-2));
+    margin-bottom:14px;
+  }
+  .brand{display:flex;flex-direction:column;gap:2px;margin-right:auto}
+  .brand .eyebrow{
+    font-family:var(--font-hud);font-size:10.5px;letter-spacing:.14em;color:var(--accent);
+    text-transform:uppercase;
+  }
+  .brand h1{margin:0;font-size:18px;font-weight:650;letter-spacing:.01em}
+  .brand .sub{font-size:12px;color:var(--ink-faint)}
+
+  .clock{
+    display:flex;align-items:baseline;gap:10px;
+    font-family:var(--font-hud);
+    padding:8px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg-2);
+  }
+  .clock .time{font-size:26px;font-weight:600;letter-spacing:.02em;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .clock .day{font-size:11px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.08em}
+
+  .controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .btn{
+    font-family:var(--font-hud);font-size:12px;letter-spacing:.02em;
+    background:var(--panel-2);color:var(--ink);border:1px solid var(--line);
+    padding:8px 12px;border-radius:7px;cursor:pointer;transition:border-color .15s, color .15s, background .15s;
+  }
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.primary{background:var(--accent);color:#03222c;border-color:var(--accent);font-weight:700}
+  .btn.primary:hover{filter:brightness(1.08);color:#03222c}
+  .btn[disabled]{opacity:.35;cursor:not-allowed;pointer-events:none}
+  .speedgroup{display:flex;gap:2px;background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:3px}
+  .speedgroup button{
+    font-family:var(--font-hud);font-size:11.5px;background:transparent;border:none;color:var(--ink-dim);
+    padding:5px 10px;border-radius:5px;cursor:pointer;
+  }
+  .speedgroup button.active{background:var(--accent-dim);color:var(--accent)}
+
+  .progressbar{height:4px;border-radius:3px;background:var(--line-soft);overflow:hidden;flex:1;min-width:120px}
+  .progressbar > i{display:block;height:100%;background:var(--accent);width:0%;transition:width .1s linear}
+
+  /* ---------- layout ---------- */
+  .layout{display:grid;grid-template-columns:1fr 360px;gap:14px;align-items:start}
+  @media (max-width:1080px){.layout{grid-template-columns:1fr}}
+
+  .panel{
+    border:1px solid var(--line);border-radius:10px;background:linear-gradient(180deg,var(--panel),var(--panel-2));
+    overflow:hidden;
+  }
+  .panel > .panel-head{
+    display:flex;align-items:center;justify-content:space-between;gap:8px;
+    padding:10px 14px;border-bottom:1px solid var(--line-soft);
+  }
+  .panel-head h2{
+    margin:0;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);font-weight:650;
+  }
+  .panel-head .count{font-family:var(--font-hud);font-size:11px;color:var(--ink-dim)}
+
+  /* ---------- canvas / floorplan ---------- */
+  .stage{position:relative}
+  canvas{display:block;width:100%;height:auto;background:
+      radial-gradient(900px 500px at 50% 20%, #0e1a24 0%, transparent 70%),
+      var(--bg-2);
+  }
+  .stage .hint{
+    position:absolute;left:14px;bottom:12px;font-family:var(--font-hud);font-size:10.5px;color:var(--ink-faint);
+    background:rgba(10,14,20,.6);padding:4px 8px;border-radius:5px;border:1px solid var(--line-soft)
+  }
+
+  .legend{display:flex;flex-wrap:wrap;gap:14px;padding:10px 14px;border-top:1px solid var(--line-soft);font-size:11px;color:var(--ink-dim)}
+  .legend .item{display:flex;align-items:center;gap:6px}
+  .legend .swatch{width:11px;height:11px;border-radius:3px;flex:none}
+  .legend .dot{width:10px;height:10px;border-radius:50%;flex:none}
+
+  /* ---------- sidebar ---------- */
+  .side-stack{display:flex;flex-direction:column;gap:14px}
+
+  .roster{max-height:330px;overflow-y:auto}
+  .rcard{
+    display:grid;grid-template-columns:34px 1fr auto;gap:10px;align-items:center;
+    padding:9px 14px;border-bottom:1px solid var(--line-soft);
+  }
+  .rcard:last-child{border-bottom:none}
+  .rbadge{
+    width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-family:var(--font-hud);font-weight:700;font-size:13px;color:#0a0e14;flex:none;
+  }
+  .rmeta{min-width:0}
+  .rmeta .rname{display:flex;align-items:center;gap:6px;font-family:var(--font-hud);font-size:12.5px;font-weight:600}
+  .rmeta .rzone{font-size:11px;color:var(--ink-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bars{display:flex;flex-direction:column;gap:3px;margin-top:4px}
+  .bar-row{display:flex;align-items:center;gap:5px}
+  .bar-row .icon{font-size:9.5px;color:var(--ink-faint);width:11px;text-align:center}
+  .bar-track{flex:1;height:5px;border-radius:3px;background:var(--line-soft);overflow:hidden;min-width:50px}
+  .bar-track > i{display:block;height:100%;border-radius:3px}
+  .bar-val{font-family:var(--font-hud);font-size:9.5px;color:var(--ink-faint);width:30px;text-align:right;font-variant-numeric:tabular-nums}
+  .pill{
+    font-family:var(--font-hud);font-size:9.5px;letter-spacing:.04em;text-transform:uppercase;
+    padding:3px 7px;border-radius:20px;border:1px solid var(--line);color:var(--ink-dim);white-space:nowrap;justify-self:end;
+  }
+
+  .zonelist{max-height:210px;overflow-y:auto;font-size:12px}
+  .zrow{display:flex;align-items:center;gap:8px;padding:7px 14px;border-bottom:1px solid var(--line-soft)}
+  .zrow:last-child{border-bottom:none}
+  .zrow .zdot{width:8px;height:8px;border-radius:2px;flex:none}
+  .zrow .zname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-dim)}
+  .zrow .zpct{font-family:var(--font-hud);font-size:11px;color:var(--ink-faint);width:34px;text-align:right;font-variant-numeric:tabular-nums}
+
+  .log{max-height:260px;overflow-y:auto;font-family:var(--font-hud);font-size:11px;line-height:1.6;padding:10px 14px}
+  .log .entry{color:var(--ink-dim);border-bottom:1px dashed var(--line-soft);padding:4px 0}
+  .log .entry:last-child{border-bottom:none}
+  .log .entry .t{color:var(--accent);margin-right:6px}
+  .log .entry.warn{color:var(--warn)}
+  .log .entry.crit{color:var(--dirty)}
+  .log .entry.ok{color:var(--clean)}
+
+  .disrupt{display:flex;flex-direction:column;gap:8px;padding:12px 14px}
+  .disrupt .btn{width:100%;text-align:left;display:flex;align-items:center;justify-content:space-between}
+  .disrupt .desc{font-size:10.5px;color:var(--ink-faint);margin-top:-4px}
+
+  .footnote{font-size:11px;color:var(--ink-faint);text-align:center;margin-top:16px;line-height:1.6}
+  .footnote a{color:var(--accent);text-decoration:none}
+
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <span class="eyebrow">MBody AI &mdash; Fleet Orchestration</span>
+      <h1>Night Shift Simulator</h1>
+      <span class="sub">Regional General Hospital &middot; 8 robots &middot; 3 OEMs &middot; schematic floor plan</span>
+    </div>
+    <div class="clock">
+      <span class="time" id="clockTime">19:00</span>
+      <span class="day" id="clockDay">Tue &middot; shift hour 0/12</span>
+    </div>
+    <div class="controls">
+      <button class="btn primary" id="playBtn">▶ Play</button>
+      <div class="speedgroup" id="speedGroup">
+        <button data-speed="1">1×</button>
+        <button data-speed="10">10×</button>
+        <button data-speed="30" class="active">30×</button>
+        <button data-speed="90">90×</button>
+      </div>
+      <button class="btn" id="resetBtn">↺ Reset</button>
+    </div>
+  </header>
+
+  <div class="progressbar" style="margin-bottom:14px"><i id="shiftProgress"></i></div>
+
+  <div class="layout">
+    <div class="panel stage">
+      <div class="panel-head">
+        <h2>Floor Plan &mdash; Live</h2>
+        <span class="count" id="zoneCount">0/8 zones complete</span>
+      </div>
+      <canvas id="floorplan" width="1000" height="640"></canvas>
+      <div class="hint" id="pathHint">hover a zone or robot for detail</div>
+      <div class="legend">
+        <div class="item"><span class="swatch" style="background:var(--dirty)"></span>not cleaned</div>
+        <div class="item"><span class="swatch" style="background:var(--clean)"></span>cleaned</div>
+        <div class="item"><span class="dot" style="background:var(--sterile)"></span>sterile zone</div>
+        <div class="item"><span class="dot" style="background:var(--oem-autoscrub)"></span>AutoScrub</div>
+        <div class="item"><span class="dot" style="background:var(--oem-cleanpath)"></span>CleanPath</div>
+        <div class="item"><span class="dot" style="background:var(--oem-floorbot)"></span>FloorBot</div>
+        <div class="item"><span class="dot" style="background:var(--off)"></span>offline</div>
+      </div>
+    </div>
+
+    <div class="side-stack">
+      <div class="panel">
+        <div class="panel-head"><h2>Fleet Roster</h2><span class="count" id="rosterCount">8 robots</span></div>
+        <div class="roster" id="roster"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Zone Status</h2><span class="count" id="zoneStatusCount"></span></div>
+        <div class="zonelist" id="zonelist"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Inject Disruption</h2></div>
+        <div class="disrupt">
+          <div>
+            <button class="btn" id="btnFail">⚠ Sensor fault on R-003 <span>→</span></button>
+            <div class="desc">Only sterile-certified robot goes offline mid-shift. No backup exists — watch the escalation.</div>
+          </div>
+          <div>
+            <button class="btn" id="btnAdhoc">☎ Ad-hoc request: clean Z1 in 1h <span>→</span></button>
+            <div class="desc">Facility manager wants the Lobby re-cleaned on a 1-hour deadline. Watch robots get pulled off other zones.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Event Log</h2></div>
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footnote">
+    Standalone browser simulation &mdash; its own simplified JS scheduler/physics, not a replay of the Python system.<br/>
+    Same concepts as the full submission: dual battery+water constraints, capability-gated zones, real-time re-planning. See <a href="#" onclick="return false">README.md / SPEC.md</a> for the full design.
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ============================== DATA ============================== */
+
+const MIN_PER_SHIFT = 720; // 19:00 -> 07:00
+const DOCK = {x:500, y:330};
+
+const ZONES = [
+  {id:"Z1", name:"Main Lobby",        sqft:20000, floor:"hard",     cls:"traffic", wStart:120, wEnd:660, x:60,  y:500, w:370, h:160, wifi:true},
+  {id:"Z2", name:"ED Hallways",       sqft:3800,  floor:"hard",     cls:"sterile", wStart:480, wEnd:600, x:360, y:60,  w:200, h:110, wifi:true},
+  {id:"Z3", name:"Cafeteria",         sqft:2600,  floor:"mixed",    cls:"standard",wStart:180, wEnd:600, x:680, y:280, w:220, h:150, wifi:true},
+  {id:"Z4", name:"Admin Wing",        sqft:5100,  floor:"carpet",   cls:"standard",wStart:0,   wEnd:240, x:460, y:520, w:220, h:130, wifi:true, days:"MWF only — idle tonight"},
+  {id:"Z5", name:"Patient Halls 2F",  sqft:6400,  floor:"hard",     cls:"sterile", wStart:360, wEnd:600, x:590, y:60,  w:230, h:110, wifi:true},
+  {id:"Z6", name:"Outpatient Wing",   sqft:4800,  floor:"hard",     cls:"standard",wStart:60,  wEnd:660, x:80,  y:280, w:240, h:180, wifi:true},
+  {id:"Z7", name:"Radiology Suite",   sqft:2200,  floor:"hard",     cls:"sterile", wStart:240, wEnd:540, x:150, y:60,  w:180, h:110, wifi:true},
+  {id:"Z8", name:"Parking Garage L1", sqft:12000, floor:"concrete", cls:"standard",wStart:0,   wEnd:720, x:720, y:520, w:240, h:130, wifi:false},
+];
+
+const FLEET = [
+  {id:"R-001", oem:"AutoScrub", model:"AS-900",  coverage:8000, battH:4.0, waterH:1.5, caps:["hard_scrub"], sterile:false},
+  {id:"R-002", oem:"AutoScrub", model:"AS-900",  coverage:8000, battH:4.0, waterH:1.5, caps:["hard_scrub"], sterile:false},
+  {id:"R-003", oem:"AutoScrub", model:"AS-900H", coverage:4500, battH:3.0, waterH:1.5, caps:["hard_scrub","sterile_scrub"], sterile:true},
+  {id:"R-004", oem:"CleanPath", model:"CP-V2",   coverage:5000, battH:3.5, waterH:null,caps:["carpet_vacuum"], sterile:false},
+  {id:"R-005", oem:"CleanPath", model:"CP-X1",   coverage:6000, battH:3.0, waterH:null,caps:["multi_surface_dry"], sterile:false},
+  {id:"R-006", oem:"FloorBot",  model:"FB-200",  coverage:7000, battH:3.5, waterH:1.5, caps:["hard_scrub"], sterile:false},
+  {id:"R-007", oem:"CleanPath", model:"CP-X1",   coverage:6000, battH:3.0, waterH:null,caps:["multi_surface_dry"], sterile:false},
+  {id:"R-008", oem:"FloorBot",  model:"FB-200",  coverage:7000, battH:3.5, waterH:1.5, caps:["hard_scrub"], sterile:false},
+];
+
+const OEM_COLOR = {AutoScrub:"#5eb1ff", CleanPath:"#c792ea", FloorBot:"#ffb454"};
+const TRAVEL_MIN = 5, TRAVEL_BATT_PCT = 2, WATER_CYCLE_MIN = 10, SANITIZE_MIN = 15, CHARGE_FULL_MIN = 90;
+const BATTERY_RETURN_PCT = 12;
+
+function canClean(robot, zone){
+  if(zone.cls === "sterile") return !!robot.sterile;
+  if(zone.floor === "carpet") return robot.caps.includes("carpet_vacuum");
+  return robot.caps.includes("hard_scrub") || robot.caps.includes("multi_surface_dry");
+}
+function prefersWet(zone){ return zone.floor === "concrete" || zone.cls === "traffic"; }
+function fmtTime(min){
+  min = Math.max(0, Math.round(min));
+  const total = (19*60 + min) % (24*60);
+  const dayOver = Math.floor((19*60 + min) / (24*60)) > 0;
+  const h = Math.floor(total/60), m = total%60;
+  return String(h).padStart(2,"0") + ":" + String(m).padStart(2,"0") + (dayOver ? "+1d" : "");
+}
+function pctToBucket(pct){
+  if(pct < 8) return "empty";
+  if(pct < 33) return "low";
+  if(pct < 66) return "med";
+  return "high";
+}
+
+/* ============================== STATE ============================== */
+
+let state = null;
+
+function freshState(){
+  const zones = {};
+  ZONES.forEach(z => zones[z.id] = {def:z, remaining:z.sqft, pct:0, status: z.days ? "not-scheduled" : "pending"});
+
+  const robots = {};
+  FLEET.forEach(r => {
+    robots[r.id] = {
+      def:r, battery:100, water: r.waterH===null ? null : 100, waterUncertain: r.waterH!==null && r.oem==="FloorBot",
+      pos:{x:DOCK.x, y:DOCK.y}, from:null, to:null, travelStart:0, travelDur:0,
+      status:"idle", zone:null, disabled:false, lastClass:null,
+      queue:[], qIdx:0, phase:"idle", phaseTimer:0, resumeZone:null,
+      stats:{water:0, charge:0}, pulled:false,
+    };
+  });
+
+  return {
+    t:0, playing:false, speed:30, lastFrame:null, acc:0,
+    zones, robots, log:[], failUsed:false, adhocUsed:false, adhocZone:null, adhocDeadline:null,
+  };
+}
+
+/* --------- simple scheduler: build each robot's ordered zone queue --------- */
+function buildSchedule(st){
+  const zoneList = Object.values(st.zones).map(z=>z.def).filter(z=>!z.days);
+  const rank = z => [z.cls==="sterile"?0:1, z.cls==="traffic"?0:1, z.wEnd, z.wStart];
+  zoneList.sort((a,b)=>{
+    const ra=rank(a), rb=rank(b);
+    for(let i=0;i<ra.length;i++) if(ra[i]!==rb[i]) return ra[i]-rb[i];
+    return 0;
+  });
+
+  const busyUntil = {}; FLEET.forEach(r=>busyUntil[r.id]=0);
+
+  zoneList.forEach(zone => {
+    const wet = prefersWet(zone);
+    const eligible = FLEET.filter(r => canClean(r, zone) && (r.sterile === (zone.cls==="sterile")));
+    eligible.sort((a,b)=>{
+      const ta = (a.caps.includes("hard_scrub")===wet) ? 0:1;
+      const tb = (b.caps.includes("hard_scrub")===wet) ? 0:1;
+      if(ta!==tb) return ta-tb;
+      if(busyUntil[a.id]!==busyUntil[b.id]) return busyUntil[a.id]-busyUntil[b.id];
+      if(b.coverage!==a.coverage) return b.coverage-a.coverage;
+      return a.id.localeCompare(b.id);
+    });
+    if(!eligible.length) return;
+    const pick = eligible[0];
+    const start = Math.max(zone.wStart, busyUntil[pick.id]);
+    const pureMin = (zone.sqft/pick.coverage)*60;
+    const dur = pureMin*1.2 + (zone.cls==="sterile"?SANITIZE_MIN:0) + TRAVEL_MIN;
+    if(start + dur > zone.wEnd) return; // infeasible -> stays MISSED, honestly
+    st.robots[pick.id].queue.push({zoneId:zone.id, plannedStart:start});
+    busyUntil[pick.id] = start + pureMin*1.2;
+  });
+}
+
+/* ============================== LOGGING ============================== */
+function log(st, msg, level){
+  st.log.unshift({t:st.t, msg, level: level||""});
+  if(st.log.length>80) st.log.length=80;
+  renderLog(st);
+}
+
+/* ============================== SIM STEP (1 sim-minute) ============================== */
+function stepRobot(st, rid){
+  const r = st.robots[rid];
+  if(r.disabled) return;
+
+  if(r.phase==="idle"){
+    if(!r.queue[r.qIdx]){ return; }
+    const task = r.queue[r.qIdx];
+    const zone = st.zones[task.zoneId].def;
+    if(st.t < task.plannedStart) return;
+    if(st.t > zone.wEnd){ r.qIdx++; return; } // window already closed, skip
+    r.zone = task.zoneId;
+    if(!(task.zoneId in st.zones)) return;
+    // sanitize?
+    const isSterile = zone.cls==="sterile";
+    if(r.def.sterile && r.lastClass!==null && r.lastClass!==isSterile){
+      r.phase="sanitize"; r.phaseTimer=SANITIZE_MIN; r.status="sanitizing";
+      log(st, `${rid} sanitization cycle before ${zone.id}`);
+      return;
+    }
+    beginTravel(st, r, zone.id, "zone");
+    return;
+  }
+
+  if(r.phase==="travel"){
+    r.phaseTimer--;
+    const p = 1 - Math.max(0,r.phaseTimer)/TRAVEL_MIN;
+    r.pos = lerpPos(r.from, r.to, Math.min(1,p));
+    if(r.phaseTimer<=0){
+      if(r.travelDest==="dock") arriveDock(st, r);
+      else arriveZone(st, r);
+    }
+    return;
+  }
+
+  if(r.phase==="sanitize"){
+    r.phaseTimer--;
+    if(r.phaseTimer<=0){ beginTravel(st, r, r.zone, "zone"); }
+    return;
+  }
+
+  if(r.phase==="escort"){
+    r.phaseTimer--;
+    if(r.phaseTimer<=0) beginClean(st, r);
+    return;
+  }
+
+  if(r.phase==="clean"){
+    stepClean(st, r);
+    return;
+  }
+
+  if(r.phase==="dock"){
+    r.phaseTimer--;
+    if(r.phaseTimer<=0){
+      r.status="idle";
+      if(r.resumeZone){ beginTravel(st, r, r.resumeZone, "zone"); r.resumeZone=null; }
+      else { r.zone=null; r.phase="idle"; r.status="idle"; }
+    }
+    return;
+  }
+}
+
+function lerpPos(a,b,p){ return {x:a.x+(b.x-a.x)*p, y:a.y+(b.y-a.y)*p}; }
+
+function beginTravel(st, r, zoneId, dest){
+  const zone = st.zones[zoneId].def;
+  r.from = {x:r.pos.x, y:r.pos.y};
+  r.to = dest==="dock" ? {x:DOCK.x,y:DOCK.y} : {x:zone.x+zone.w/2, y:zone.y+zone.h/2};
+  r.travelDest = dest;
+  r.phase="travel"; r.phaseTimer=TRAVEL_MIN; r.status="en route";
+  r.battery = Math.max(0, r.battery - TRAVEL_BATT_PCT);
+}
+
+function arriveZone(st, r){
+  const zone = st.zones[r.zone].def;
+  const afterHour = st.t >= 240;
+  const wait = afterHour ? (seedRandom(r.id+"|"+Math.floor(st.t/40))*10) : 0;
+  if(wait>0.4){
+    r.phase="escort"; r.phaseTimer=wait; r.status="escort wait";
+    log(st, `${r.def.id} security escort wait ${wait.toFixed(1)}m at ${zone.id}`);
+    return;
+  }
+  beginClean(st, r);
+}
+
+function beginClean(st, r){
+  const zone = st.zones[r.zone].def;
+  r.phase="clean"; r.status="cleaning";
+  r.lastClass = zone.cls==="sterile";
+  if(!zone.wifi) { r.offlineMission = true; log(st, `${r.def.id} OFFLINE MISSION handoff at ${zone.id} (no WiFi) — running preloaded plan`); }
+}
+
+function stepClean(st, r){
+  const zEntry = st.zones[r.zone];
+  const zone = zEntry.def;
+
+  if(st.t >= zone.wEnd){
+    const pct = zEntry.pct;
+    zEntry.status = pct>2 ? "partial" : "missed";
+    log(st, `${zone.id} window closed at ${pct.toFixed(0)}% — ${zEntry.status.toUpperCase()}`, pct>2?"warn":"crit");
+    finishTask(st, r);
+    return;
+  }
+
+  // dual-constraint check
+  let bindWater = false;
+  if(r.water!==null){
+    if(r.waterUncertain){
+      const b = pctToBucket(r.water);
+      bindWater = (b==="low" || b==="empty");
+    } else bindWater = r.water <= 4;
+  }
+  const bindBattery = r.battery <= BATTERY_RETURN_PCT;
+  if(bindBattery || bindWater){
+    log(st, `${r.def.id} returning to dock from ${zone.id} — binding: ${bindBattery?"battery":"water"}`);
+    if(r.offlineMission){ log(st, `${r.def.id} reconnects, reconciling offline telemetry`); r.offlineMission=false; }
+    r.resumeZone = r.zone;
+    beginTravel(st, r, r.zone, "dock");
+    return;
+  }
+
+  const drainBatt = 100/(r.def.battH*60);
+  r.battery = Math.max(0, r.battery - drainBatt);
+  if(r.water!==null){
+    const drainWater = 100/(r.def.waterH*60);
+    r.water = Math.max(0, r.water - drainWater);
+  }
+
+  const perMin = r.def.coverage/60;
+  zEntry.remaining = Math.max(0, zEntry.remaining - perMin);
+  zEntry.pct = 100*(1 - zEntry.remaining/zone.sqft);
+
+  if(zEntry.remaining<=0){
+    zEntry.status="complete"; zEntry.pct=100;
+    log(st, `${zone.id} complete`, "ok");
+    if(r.offlineMission){ log(st, `${r.def.id} reconnects, reconciling offline telemetry`); r.offlineMission=false; }
+    finishTask(st, r);
+  }
+}
+
+function arriveDock(st, r){
+  const needCharge = r.battery < 98;
+  const needWater = r.water!==null && r.water < 90;
+  const chargeMin = needCharge ? (100-r.battery)*(CHARGE_FULL_MIN/100) : 0;
+  const waterMin = needWater ? WATER_CYCLE_MIN : 0;
+  r.phase="dock"; r.phaseTimer=Math.max(chargeMin, waterMin, 1); r.status="dock service";
+  if(needWater) r.stats.water++;
+  if(needCharge) r.stats.charge++;
+}
+
+function finishTask(st, r){
+  r.qIdx++; r.zone=null; r.phase="idle"; r.status="idle";
+}
+
+function seedRandom(key){
+  let h=0; for(let i=0;i<key.length;i++){ h = (h*31 + key.charCodeAt(i))|0; }
+  h = (h ^ (h>>>15))>>>0;
+  return (h % 1000)/1000;
+}
+
+/* ============================== DISRUPTIONS ============================== */
+function injectFailure(st){
+  if(st.failUsed) return; st.failUsed=true;
+  const r = st.robots["R-003"];
+  r.disabled=true; r.status="OFFLINE"; r.battery=r.battery;
+  log(st, "R-003 (AS-900H) reports SENSOR_FAULT and goes OFFLINE", "crit");
+  const sterileZones = Object.values(st.zones).filter(z=>z.def.cls==="sterile" && z.status!=="complete");
+  sterileZones.forEach(z=>{ z.status = z.status==="pending"?"at-risk":z.status; });
+  log(st, `No backup sterile-certified robot exists. Escalating to human operator: ` +
+    `${sterileZones.map(z=>z.def.id).join(", ")||"remaining sterile zones"} flagged MISSED-ESCALATED, not silently skipped.`, "warn");
+  document.getElementById("btnFail").setAttribute("disabled","true");
+}
+
+function injectAdhoc(st){
+  if(st.adhocUsed) return; st.adhocUsed=true;
+  const zone = st.zones["Z1"].def;
+  const deadline = st.t + 60;
+  st.adhocDeadline = deadline;
+  log(st, `AD-HOC REQUEST: facility manager wants ${zone.id} cleaned by ${fmtTime(deadline)}`, "warn");
+  const idle = Object.values(st.robots).filter(r=>!r.disabled && r.phase==="idle" && canClean(r.def, zone));
+  idle.sort((a,b)=> b.def.coverage - a.def.coverage);
+  const pulled = idle.slice(0,2);
+  pulled.forEach(r=>{
+    r.queue.splice(r.qIdx, 0, {zoneId:"Z1", plannedStart:st.t});
+    r.pulled = true;
+  });
+  log(st, `Pulled ${pulled.length ? pulled.map(r=>r.def.id).join(", ") : "no idle robots available"} to help ${zone.id}.`, pulled.length?"ok":"warn");
+  document.getElementById("btnAdhoc").setAttribute("disabled","true");
+}
+
+/* ============================== RENDER ============================== */
+const cvs = document.getElementById("floorplan");
+const ctx = cvs.getContext("2d");
+
+function draw(st){
+  ctx.clearRect(0,0,cvs.width,cvs.height);
+
+  // faint grid
+  ctx.strokeStyle = "rgba(255,255,255,0.025)";
+  ctx.lineWidth=1;
+  for(let x=0;x<cvs.width;x+=40){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,cvs.height); ctx.stroke(); }
+  for(let y=0;y<cvs.height;y+=40){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(cvs.width,y); ctx.stroke(); }
+
+  // connectors
+  Object.values(st.zones).forEach(z=>{
+    const cx=z.def.x+z.def.w/2, cy=z.def.y+z.def.h/2;
+    ctx.setLineDash(z.def.wifi ? [] : [5,5]);
+    ctx.strokeStyle = "rgba(69,217,255,0.10)";
+    ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(DOCK.x,DOCK.y); ctx.lineTo(cx,cy); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  // zones
+  Object.values(st.zones).forEach(z=>drawZone(st,z));
+
+  // dock
+  drawDock(st);
+
+  // robots
+  Object.values(st.robots).forEach(r=>drawRobot(st,r));
+}
+
+function drawZone(st, z){
+  const d = z.def;
+  const notScheduled = d.days;
+  ctx.save();
+
+  // base (dirty) rect
+  const baseColor = notScheduled ? "rgba(255,255,255,0.03)" : "rgba(217,86,79,0.16)";
+  roundRect(ctx, d.x, d.y, d.w, d.h, 8);
+  ctx.fillStyle = baseColor;
+  ctx.fill();
+
+  // clean wipe fill, growing from left
+  if(!notScheduled && z.pct>0){
+    ctx.save();
+    roundRect(ctx, d.x, d.y, d.w, d.h, 8);
+    ctx.clip();
+    const fw = d.w * (z.pct/100);
+    const grad = ctx.createLinearGradient(d.x,0,d.x+fw,0);
+    grad.addColorStop(0, "rgba(52,193,122,0.20)");
+    grad.addColorStop(1, "rgba(52,193,122,0.40)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(d.x, d.y, fw, d.h);
+    ctx.restore();
+  }
+
+  // border
+  let borderColor = "rgba(255,255,255,0.14)";
+  if(z.status==="complete") borderColor = "var(--clean)";
+  if(z.status==="at-risk") borderColor = "#d9564f";
+  if(d.cls==="sterile") borderColor = "#b98af0";
+  roundRect(ctx, d.x, d.y, d.w, d.h, 8);
+  ctx.lineWidth = z.status==="at-risk" ? 2.4 : 1.4;
+  ctx.strokeStyle = resolveVar(borderColor);
+  if(z.status==="at-risk"){
+    ctx.strokeStyle = `rgba(217,86,79,${0.55+0.35*Math.sin(st.t*0.9)})`;
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // label
+  ctx.fillStyle = notScheduled ? "rgba(255,255,255,0.28)" : "#e7edf5";
+  ctx.font = "600 13px ui-sans-serif, system-ui, sans-serif";
+  ctx.textBaseline = "top";
+  ctx.fillText(d.id + "  " + d.name, d.x+10, d.y+9);
+
+  ctx.font = "10.5px ui-monospace, monospace";
+  ctx.fillStyle = "rgba(231,237,245,0.45)";
+  const sub = notScheduled ? d.days : `${d.sqft.toLocaleString()} ft² · ${fmtTime(d.wStart)}–${fmtTime(d.wEnd)}`;
+  ctx.fillText(sub, d.x+10, d.y+27);
+
+  if(d.cls==="sterile"){
+    ctx.fillStyle = "#b98af0";
+    ctx.font = "9.5px ui-monospace, monospace";
+    ctx.fillText("STERILE", d.x+10, d.y+d.h-16);
+  }
+  if(!d.wifi){
+    ctx.fillStyle = "#f2b23c";
+    ctx.font = "9.5px ui-monospace, monospace";
+    ctx.fillText("NO WIFI — OFFLINE MISSION ZONE", d.x+10, d.y+d.h-16);
+  }
+  if(!notScheduled){
+    ctx.fillStyle = "rgba(231,237,245,0.6)";
+    ctx.font = "600 10.5px ui-monospace, monospace";
+    ctx.textAlign="right";
+    ctx.fillText(Math.round(z.pct)+"%", d.x+d.w-10, d.y+9);
+    ctx.textAlign="left";
+  }
+
+  // window bar
+  if(!notScheduled){
+    const bx=d.x+10, by=d.y+d.h-10, bw=d.w-20, bh=4;
+    ctx.fillStyle="rgba(255,255,255,0.08)"; ctx.fillRect(bx,by,bw,bh);
+    const ws = bx + bw*(d.wStart/MIN_PER_SHIFT), we = bx + bw*(d.wEnd/MIN_PER_SHIFT);
+    ctx.fillStyle="rgba(69,217,255,0.35)"; ctx.fillRect(ws,by,we-ws,bh);
+    const playhead = bx + bw*(st.t/MIN_PER_SHIFT);
+    ctx.fillStyle="#45d9ff"; ctx.fillRect(playhead-1,by-2,2,bh+4);
+  }
+}
+
+function drawDock(st){
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(DOCK.x, DOCK.y, 38, 0, Math.PI*2);
+  ctx.fillStyle = "rgba(69,217,255,0.10)";
+  ctx.fill();
+  ctx.lineWidth=1.6; ctx.strokeStyle="rgba(69,217,255,0.55)"; ctx.stroke();
+  ctx.fillStyle="#45d9ff"; ctx.font="700 10px ui-monospace, monospace"; ctx.textAlign="center";
+  ctx.fillText("DOCK", DOCK.x, DOCK.y-3);
+  ctx.font="9px ui-monospace, monospace"; ctx.fillStyle="rgba(69,217,255,0.7)";
+  ctx.fillText("⚡ + 💧", DOCK.x, DOCK.y+9);
+  ctx.textAlign="left";
+  ctx.restore();
+}
+
+function drawRobot(st, r){
+  const color = OEM_COLOR[r.def.oem];
+  const x=r.pos.x, y=r.pos.y;
+  ctx.save();
+
+  if(r.disabled){
+    ctx.beginPath(); ctx.arc(x,y,11,0,Math.PI*2);
+    ctx.fillStyle="#2a3240"; ctx.fill();
+    ctx.strokeStyle="#d9564f"; ctx.lineWidth=1.6; ctx.stroke();
+    ctx.strokeStyle="#d9564f"; ctx.beginPath();
+    ctx.moveTo(x-5,y-5); ctx.lineTo(x+5,y+5); ctx.moveTo(x+5,y-5); ctx.lineTo(x-5,y+5); ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  // ring: battery level
+  const battFrac = r.battery/100;
+  ctx.beginPath();
+  ctx.arc(x,y,13,-Math.PI/2, -Math.PI/2 + battFrac*Math.PI*2);
+  ctx.strokeStyle = r.battery<20 ? "#d9564f" : r.battery<45 ? "#f2b23c" : "#34c17a";
+  ctx.lineWidth=2.4; ctx.stroke();
+
+  // body
+  ctx.beginPath(); ctx.arc(x,y,10.5,0,Math.PI*2);
+  ctx.fillStyle=color; ctx.fill();
+  ctx.fillStyle="#0a0e14"; ctx.font="700 10px ui-monospace, monospace"; ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillText(r.def.oem[0], x, y+0.5);
+  ctx.restore();
+
+  // status glyph
+  if(r.status==="cleaning"){
+    ctx.fillStyle="rgba(52,193,122,0.9)"; ctx.font="9px ui-monospace, monospace"; ctx.textAlign="center";
+    ctx.fillText("● clean", x, y+24);
+  } else if(r.status==="escort wait"){
+    ctx.fillStyle="#f2b23c"; ctx.font="9px ui-monospace, monospace"; ctx.textAlign="center";
+    ctx.fillText("⛨ escort", x, y+24);
+  } else if(r.status==="dock service"){
+    ctx.fillStyle="#45d9ff"; ctx.font="9px ui-monospace, monospace"; ctx.textAlign="center";
+    ctx.fillText("⚡ service", x, y+24);
+  } else if(r.status==="sanitizing"){
+    ctx.fillStyle="#b98af0"; ctx.font="9px ui-monospace, monospace"; ctx.textAlign="center";
+    ctx.fillText("✱ sanitize", x, y+24);
+  }
+  ctx.fillStyle="rgba(231,237,245,0.65)"; ctx.font="600 9px ui-monospace, monospace"; ctx.textAlign="center";
+  ctx.fillText(r.def.id, x, y-18);
+  ctx.textAlign="left"; ctx.textBaseline="alphabetic";
+}
+
+function roundRect(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+function resolveVar(v){
+  if(v.startsWith("var(")){
+    const name = v.slice(4,-1);
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#ffffff";
+  }
+  return v;
+}
+
+/* ============================== UI: roster / zonelist / log ============================== */
+function renderRoster(st){
+  const el = document.getElementById("roster");
+  el.innerHTML = "";
+  Object.values(st.robots).forEach(r=>{
+    const zoneName = r.zone ? st.zones[r.zone].def.id : (r.disabled ? "—" : "dock");
+    const battColor = r.battery<20?"var(--dirty)":r.battery<45?"var(--warn)":"var(--clean)";
+    let waterHtml = "";
+    if(r.def.waterH!==null){
+      const wColor = r.water<15?"var(--dirty)":r.water<35?"var(--warn)":"var(--water)";
+      const label = r.waterUncertain ? pctToBucket(r.water) : Math.round(r.water)+"%";
+      waterHtml = `<div class="bar-row"><span class="icon">\u{1F4A7}</span><div class="bar-track"><i style="width:${r.water}%;background:${wColor}"></i></div><span class="bar-val">${label}</span></div>`;
+    } else {
+      waterHtml = `<div class="bar-row"><span class="icon">\u{1F4A7}</span><div class="bar-track"><i style="width:0%"></i></div><span class="bar-val">n/a</span></div>`;
+    }
+    const card = document.createElement("div");
+    card.className="rcard";
+    card.innerHTML = `
+      <div class="rbadge" style="background:${OEM_COLOR[r.def.oem]}">${r.def.oem[0]}</div>
+      <div class="rmeta">
+        <div class="rname">${r.def.id} <span style="color:var(--ink-faint);font-weight:400">${r.def.model}</span></div>
+        <div class="rzone">${zoneName}${r.pulled?" · pulled":""}</div>
+        <div class="bars">
+          <div class="bar-row"><span class="icon">⚡</span><div class="bar-track"><i style="width:${r.battery}%;background:${battColor}"></i></div><span class="bar-val">${Math.round(r.battery)}%</span></div>
+          ${waterHtml}
+        </div>
+      </div>
+      <div class="pill" style="${r.disabled?'color:var(--dirty);border-color:var(--dirty)':''}">${r.disabled?"offline":r.status}</div>
+    `;
+    el.appendChild(card);
+  });
+}
+
+function renderZoneList(st){
+  const el = document.getElementById("zonelist");
+  el.innerHTML="";
+  let done=0, total=0;
+  Object.values(st.zones).forEach(z=>{
+    if(z.def.days) return;
+    total++;
+    if(z.status==="complete") done++;
+    const colors = {pending:"var(--off)", "at-risk":"var(--dirty)", partial:"var(--warn)", missed:"var(--dirty)", complete:"var(--clean)"};
+    const row = document.createElement("div");
+    row.className="zrow";
+    row.innerHTML = `<span class="zdot" style="background:${colors[z.status]||"var(--off)"}"></span>
+      <span class="zname">${z.def.id} ${z.def.name}</span>
+      <span class="zpct">${Math.round(z.pct)}%</span>`;
+    el.appendChild(row);
+  });
+  document.getElementById("zoneCount").textContent = `${done}/${total} zones complete`;
+  document.getElementById("zoneStatusCount").textContent = `${done}/${total} complete`;
+}
+
+function renderLog(st){
+  const el = document.getElementById("log");
+  el.innerHTML = st.log.map(e=>`<div class="entry ${e.level}"><span class="t">${fmtTime(e.t)}</span>${escapeHtml(e.msg)}</div>`).join("");
+}
+function escapeHtml(s){ return s.replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function renderClock(st){
+  document.getElementById("clockTime").textContent = fmtTime(st.t).replace("+1d","");
+  const hour = (st.t/60).toFixed(1);
+  document.getElementById("clockDay").textContent = `Tue · shift hour ${hour}/12${st.t>=MIN_PER_SHIFT?" · SHIFT COMPLETE":""}`;
+  document.getElementById("shiftProgress").style.width = Math.min(100, 100*st.t/MIN_PER_SHIFT)+"%";
+}
+
+/* ============================== MAIN LOOP ============================== */
+function tick(st){
+  Object.keys(st.robots).forEach(rid=>stepRobot(st, rid));
+  st.t += 1;
+}
+
+function frame(ts){
+  if(state.lastFrame===null) state.lastFrame = ts;
+  const dtReal = (ts - state.lastFrame)/1000;
+  state.lastFrame = ts;
+
+  if(state.playing && state.t < MIN_PER_SHIFT){
+    state.acc += dtReal * state.speed;
+    let steps=0;
+    while(state.acc >= 1 && state.t < MIN_PER_SHIFT && steps<400){
+      tick(state); state.acc -= 1; steps++;
+    }
+    if(state.t >= MIN_PER_SHIFT){
+      state.playing=false;
+      document.getElementById("playBtn").textContent = "▶ Play";
+      log(state, "SHIFT COMPLETE — 07:00", "ok");
+    }
+  } else {
+    // still interpolate robot positions smoothly even between ticks
+  }
+
+  draw(state);
+  renderClock(state);
+  renderRoster(state);
+  renderZoneList(state);
+  requestAnimationFrame(frame);
+}
+
+/* ============================== INIT / CONTROLS ============================== */
+function init(){
+  state = freshState();
+  buildSchedule(state);
+  log(state, "Schedule generated. Zones assigned by capability, window, and dual-constraint feasibility.");
+  renderClock(state); renderRoster(state); renderZoneList(state); draw(state);
+  document.getElementById("btnFail").removeAttribute("disabled");
+  document.getElementById("btnAdhoc").removeAttribute("disabled");
+}
+
+document.getElementById("playBtn").addEventListener("click", ()=>{
+  state.playing = !state.playing;
+  document.getElementById("playBtn").textContent = state.playing ? "⏸ Pause" : "▶ Play";
+});
+document.getElementById("resetBtn").addEventListener("click", init);
+document.getElementById("btnFail").addEventListener("click", ()=>injectFailure(state));
+document.getElementById("btnAdhoc").addEventListener("click", ()=>injectAdhoc(state));
+document.querySelectorAll("#speedGroup button").forEach(btn=>{
+  btn.addEventListener("click", ()=>{
+    document.querySelectorAll("#speedGroup button").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    state.speed = Number(btn.dataset.speed);
+  });
+});
+
+init();
+requestAnimationFrame(frame);
+</script>

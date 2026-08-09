@@ -20,6 +20,22 @@ python -m unittest tests.test_basic -v   # run the test suite (15 tests)
 
 No dependencies beyond the Python 3.10+ standard library.
 
+## Visual demo (browser)
+
+`visualizer/index.html` is a standalone, self-contained 2D simulation you
+can just open in a browser (no server, no build step) — a schematic bird's
+eye floor plan where zones paint from red to green as robots clean them,
+live battery/water bars per robot (including FloorBot's uncertain bucket
+reading), a real-time clock across the 19:00-07:00 shift, and two
+one-click disruptions (the R-003 sensor fault, the ad-hoc Z1 request).
+
+**This is a separate, simplified JavaScript simulation** with its own
+scheduler/physics for visualization purposes — it is not a replay of the
+Python system's actual output, and its numbers won't match a given
+`main.py` run exactly. It demonstrates the same concepts (dual battery+water
+constraints, capability-gated zones, real-time re-planning) for a reader
+who wants to *see* the mechanism rather than read a shift report.
+
 ## What it simulates
 
 A per-minute discrete-event simulation of the 19:00-07:00 shift described in
