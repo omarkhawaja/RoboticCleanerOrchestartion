@@ -52,6 +52,9 @@ def main():
     zone_status_counts = defaultdict(lambda: defaultdict(int))
     dock_visits_per_shift = []
     minutes_lost_per_shift = []
+    slack_per_shift = []          # minutes between last zone finishing and 07:00 (t=720)
+    slack_per_shift_by_day = defaultdict(list)
+    last_finish_per_shift = []
 
     for day in DAYS:
         for seed in range(SEEDS_PER_DAY):
@@ -78,6 +81,20 @@ def main():
             minutes_lost_per_shift.append(shift_minutes_lost)
             for zid, rec in monitor.zones.items():
                 zone_status_counts[zid][rec.status.value] += 1
+
+            # slack = time from the last zone finishing to the end of the
+            # 12h shift (t=720). Only counts zones actually scheduled that
+            # day and that reached a terminal COMPLETE/PARTIAL state --
+            # a zone that never started (no eligible robot) has no finish
+            # time and shouldn't be treated as "finished at t=0".
+            finish_times = [rec.last_cleaned_t for rec in monitor.zones.values()
+                             if rec.last_cleaned_t is not None]
+            if finish_times:
+                last_finish = max(finish_times)
+                slack = 720 - last_finish
+                slack_per_shift.append(slack)
+                slack_per_shift_by_day[day].append(slack)
+                last_finish_per_shift.append(last_finish)
 
     print(f"Simulated {n_runs} shifts ({len(DAYS)} days x {SEEDS_PER_DAY} seeds each)\n")
 
@@ -125,6 +142,26 @@ def main():
     for day in DAYS:
         d = per_day[day]
         print(f"  {day:<6}{d['water_bound_stops']:>14}{d['battery_bound_stops']:>16}")
+
+    print("\n" + "=" * 78)
+    print("SLACK TIME: last zone finish -> end of 12h shift window (t=720 / 07:00)")
+    print("=" * 78)
+    print(f"  shifts with at least one completed/partial zone: {len(slack_per_shift)}/{n_runs}")
+    print(f"  mean slack:   {statistics.mean(slack_per_shift):6.1f} min "
+          f"({statistics.mean(slack_per_shift)/60:.2f} h)")
+    print(f"  median slack: {statistics.median(slack_per_shift):6.1f} min")
+    print(f"  min slack:    {min(slack_per_shift):6.1f} min  (tightest shift observed)")
+    print(f"  max slack:    {max(slack_per_shift):6.1f} min  (most slack observed)")
+    print(f"  stdev:        {statistics.pstdev(slack_per_shift):6.1f} min")
+    print(f"  mean last-zone-finish time: {statistics.mean(last_finish_per_shift):.1f} min "
+          f"into the shift ({statistics.mean(last_finish_per_shift)/60:.2f} h of 12h used)")
+
+    print(f"\n  {'Day':<6}{'mean slack (min)':>18}{'min slack':>12}{'max slack':>12}{'n':>5}")
+    for day in DAYS:
+        vals = slack_per_shift_by_day[day]
+        if not vals:
+            continue
+        print(f"  {day:<6}{statistics.mean(vals):>18.1f}{min(vals):>12.1f}{max(vals):>12.1f}{len(vals):>5}")
 
     print("\n" + "=" * 78)
     print("ZONE COMPLETION ACROSS ALL SHIFTS (coverage side of the tradeoff)")
