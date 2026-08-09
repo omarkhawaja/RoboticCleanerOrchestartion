@@ -27,10 +27,30 @@ from typing import List, Optional
 from ..models import RobotSpec, RobotStatus, Telemetry
 
 DOCK = "DOCK"
-TRAVEL_MINUTES = 5
+TRAVEL_MINUTES = 5           # baseline transition cost, per the assignment spec
 TRAVEL_BATTERY_PCT = 2.0
 WATER_CYCLE_MINUTES = 10.0
 SANITIZE_MINUTES = 15.0
+
+# Scrubbers drive faster when NOT scrubbing. Traction-drive auto-scrubbers
+# (the AS-900/AS-900H's own product family included) run a "transport mode"
+# with the scrub deck and squeegee raised for open travel, and cap their
+# speed only while the deck is down and actively scrubbing -- the cap
+# exists so the brushes get enough dwell time and the squeegee has time to
+# fully dry the floor, not because the drivetrain can't go faster. A
+# dock-service round trip (heading back for water/battery, and the return
+# leg once serviced) is the clearest case of pure transport-mode travel:
+# deck fully raised and stowed, a known/repeated route, nothing to clean
+# along the way. We model that leg faster than the assignment's baseline
+# 5-minute transition -- assumed here at a ~40% reduction (a mid-range
+# figure for transport-vs-working speed caps on this class of machine;
+# not vendor-specified for AS-900 exactly, so treated as an estimate, not
+# a spec value). Battery cost per transition is left unchanged (still
+# TRAVEL_BATTERY_PCT) since higher speed plausibly draws more current over
+# the same-ish distance -- there's no data suggesting transport mode is
+# more energy-efficient at the pack level, only faster. See SPEC.md for
+# the reasoning and the before/after schedule-slack numbers.
+TRAVEL_MINUTES_DOCK = 3.0    # dock <-> zone leg specifically (transport mode both ways)
 
 # Charging is NOT linear. Real Li-ion packs charge in two phases: constant
 # current (CC) up to ~90%, fast, then constant voltage (CV) trickle-taper

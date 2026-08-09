@@ -21,6 +21,7 @@ from .hal.base import (
     SANITIZE_MINUTES,
     TRAVEL_BATTERY_PCT,
     TRAVEL_MINUTES,
+    TRAVEL_MINUTES_DOCK,
     WATER_CYCLE_MINUTES,
     CHARGE_DISPATCH_TARGET_PCT,
     charge_minutes_to_target,
@@ -174,7 +175,9 @@ class RobotController:
             if self.phase_timer <= 0:
                 adapter.set_internal_status(RobotStatus.IDLE)
                 if self.resume_zone is not None:
-                    self._begin_travel(t, self.resume_zone)
+                    # dock -> zone leg of a service round trip: transport
+                    # mode, deck still raised until cleaning resumes -- fast.
+                    self._begin_travel(t, self.resume_zone, fast=True)
                     self.resume_zone = None
                 else:
                     self.current = None
@@ -182,11 +185,11 @@ class RobotController:
             return
 
     # -- phase transitions --------------------------------------------------
-    def _begin_travel(self, t: float, target_zone: str):
+    def _begin_travel(self, t: float, target_zone: str, fast: bool = False):
         self.adapter.phys.position = "IN_TRANSIT"
         self.adapter.set_internal_status(RobotStatus.EN_ROUTE)
         self.adapter.phys.battery_pct = max(0.0, self.adapter.phys.battery_pct - TRAVEL_BATTERY_PCT)
-        self.phase, self.phase_timer = "TRAVEL", TRAVEL_MINUTES
+        self.phase, self.phase_timer = "TRAVEL", (TRAVEL_MINUTES_DOCK if fast else TRAVEL_MINUTES)
         self.travel_destination = "ZONE"
         self.stats["travel_events"] += 1
 
@@ -254,7 +257,9 @@ class RobotController:
         self.adapter.set_internal_status(RobotStatus.EN_ROUTE)
         self.adapter.phys.position = "IN_TRANSIT"
         self.adapter.phys.battery_pct = max(0.0, self.adapter.phys.battery_pct - TRAVEL_BATTERY_PCT)
-        self.phase, self.phase_timer = "TRAVEL", TRAVEL_MINUTES
+        # zone -> dock leg: transport mode, deck/squeegee raised for the run
+        # back -- see TRAVEL_MINUTES_DOCK in hal/base.py.
+        self.phase, self.phase_timer = "TRAVEL", TRAVEL_MINUTES_DOCK
         self.travel_destination = "DOCK"
         self.pending_binding_reason = binding
 

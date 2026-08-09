@@ -133,7 +133,60 @@ future refinement, deliberately not built here to keep the policy a
 single named constant with an obvious justification rather than another
 tunable heuristic layered on top of the scheduler's existing ones.
 
-## 4. Heuristic scheduler, not an ILP/CP-SAT solver
+## 4. Scrubbers drive faster when they're not scrubbing
+
+**Observation, not something built into the original model:** a
+traction-drive auto-scrubber like the AS-900/AS-900H doesn't have one
+driving speed. It has two distinct speed profiles, and which one applies
+depends on whether the scrub deck and squeegee are down:
+
+- **Transport mode** (deck/squeegee raised): high-speed driving, used to
+  cross already-clean areas, go up ramps, or return to the dock.
+- **Scrubbing mode** (deck down, actively cleaning): speed is capped on
+  purpose, so the brushes get enough dwell time to agitate dirt and the
+  squeegee has time to fully dry the floor behind it. The cap is a
+  cleaning-quality constraint, not a drivetrain limit.
+
+This system already had exactly this two-mode split, just not in name --
+`CLEAN` phase throughput is governed by `coverage_ft2_hr` (the
+scrubbing-mode cap), and `TRAVEL` phase is a separate cost entirely. What
+it was missing: **all travel was charged at one flat rate**, whether it
+was a normal zone-to-zone repositioning or a dock-service round trip, even
+though a dock round trip is the cleanest possible case of pure transport
+mode -- deck fully raised and stowed, a known repeated route, nothing to
+clean along the way.
+
+**Change made:** `TRAVEL_MINUTES_DOCK = 3.0` (down from the baseline
+`TRAVEL_MINUTES = 5.0`) now applies specifically to the zone->dock and
+dock->zone legs of a service trip (`dispatcher.py::_begin_dock_return` and
+the DOCK_SERVICE resume path), a ~40% reduction. The baseline 5-minute
+figure is left untouched for ordinary zone-to-zone dispatch, since that's
+an explicit assignment-given constant ("5 minutes... per transition") and
+there's no comparable hard evidence for treating that specific leg as
+faster -- extending the speed differential further than the case it's
+actually documented for would be overreaching past what's justified.
+
+**Why 40% and not some other number?** No AS-900-specific transport-vs-
+scrubbing speed ratio was available, so this is an estimate pinned to the
+general behavior of the machine class (traction-drive auto-scrubbers),
+not a vendor spec value -- called out here explicitly rather than
+presented as more precise than it is. Battery cost per transition
+(`TRAVEL_BATTERY_PCT`) is left unchanged: higher speed plausibly draws
+more current over a similar distance, so there's no basis for assuming
+transport mode is also more energy-efficient, only faster.
+
+**Measured impact, stacked on top of #3's charging change:** re-running
+the 140-shift study with both changes in place, mean fleet-wide slack
+rises again, from 170.8 min (charging change alone) to **174.6 min**
+(+3.8 min further, +27.3% total vs. the original 137.2-min baseline
+before either change). Smaller than the charging curve's effect -- a dock
+round trip is a few minutes either way, a CV taper was tens of minutes --
+but it's the same direction and it's free: no coverage or safety margin
+given up for it (0 partial/missed zones across all 140 shifts, unchanged).
+Single-day trace example: the Tuesday demo's last zone finish moves from
+04:08 AM (charging change only) to **04:04 AM** (both changes).
+
+## 5. Heuristic scheduler, not an ILP/CP-SAT solver
 
 8 robots x 8 zones is small enough that a real constraint solver (OR-Tools
 CP-SAT, e.g.) would find a provably-optimal assignment in milliseconds, and
@@ -148,7 +201,7 @@ soft preferences (minimize robot-hours, balance wear across the fleet).
   thinking over polish -- a heuristic I can fully explain in the 30-minute
   walkthrough is worth more here than a solver I'd have to hand-wave past.
 - The **Dispatcher is the actual source of truth for water/battery timing**
-  (see #5) -- the scheduler only needs to prove a plan is *plausible*, not
+  (see #6) -- the scheduler only needs to prove a plan is *plausible*, not
   compute exact break timing, which shrinks the problem a solver would need
   to solve anyway.
 - Tradeoff accepted: the heuristic can leave value on the table (e.g. it
@@ -156,7 +209,7 @@ soft preferences (minimize robot-hours, balance wear across the fleet).
   is a rounding error; it would not scale to hundreds of zones without a
   real solver.
 
-## 5. The scheduler plans; the Dispatcher decides when cycles actually happen
+## 6. The scheduler plans; the Dispatcher decides when cycles actually happen
 
 The scheduler produces a *plan* (who cleans what, roughly when, with a 20%
 time buffer for cycle overhead as a feasibility check). It **deliberately
@@ -176,7 +229,7 @@ buffer), so it will occasionally accept a zone that later needs a second,
 unplanned-for cycle and runs past its window -- that shows up honestly as
 `PARTIAL` in the shift report rather than being hidden.
 
-## 6. Shared per-zone progress pool for multi-robot zones
+## 7. Shared per-zone progress pool for multi-robot zones
 
 When two robots are assigned to the same zone (e.g. a large zone under
 time pressure), they draw down **one shared remaining-sqft counter**, not
@@ -192,16 +245,17 @@ that a solver would never introduce (it reasons about the whole assignment
 at once) but a greedy per-robot heuristic can, and is worth naming
 explicitly rather than papering over.
 
-## 7. FloorBot water uncertainty: conservative, not aggressive
+## 8. FloorBot water uncertainty: conservative, not aggressive
 
 FloorBot's coarse 4-bucket water reporting (`high/med/low/empty`) means a
 "low" reading covers a wide true range (roughly 8-33% of tank capacity,
 i.e. anywhere from ~7 to ~30 minutes remaining). Two policies are possible:
 
-- **Aggressive:** trust the midpoint estimate, keep cleaning until "empty."
-  Maximizes cleaning time per water cycle, risks running the tank dry
-  mid-zone (an actual failure mode, not just a missed deadline -- a dry
-  scrubber can damage the floor or itself).
+- **Aggressive:** trust the estimate (bucket midpoint, or the fused
+  usage-time estimate from #9), keep cleaning until "empty." Maximizes
+  cleaning time per water cycle, risks running the tank dry mid-zone (an
+  actual failure mode, not just a missed deadline -- a dry scrubber can
+  damage the floor or itself).
 - **Conservative (chosen):** treat "low" as the trigger to return, not
   "empty." Costs some cleaning time (the robot could sometimes have safely
   continued), buys certainty against ever running dry.
@@ -214,7 +268,71 @@ confirm a leak. The assignment's own "What Will Impress Us" section calls
 this exact tradeoff out, so the choice and its cost are made explicit here
 rather than left implicit in a threshold constant.
 
-## 8. Scripted vs. emergent disruptions in the demo
+## 9. FloorBot's coarse reading, sharpened with a usage-time model
+
+**Question worth asking of any coarse sensor:** FloorBot only reports a
+4-value bucket, but AutoScrub reports a precise water percentage from the
+same underlying physical quantity (a tank draining at a known rate while
+cleaning). Since we already know the OEM's rated `water_hours` and can
+track exactly how long a robot has been actively cleaning since its last
+confirmed refill -- the same continuous signal AutoScrub gets for free
+from a precise sensor -- can that usage-time reasoning sharpen FloorBot's
+coarse signal instead of just reporting a static bucket midpoint?
+
+**Yes, with one important caveat: it's fusion, not replacement.** A pure
+time-based model would drift -- floor texture, water pressure setting, a
+partially-clogged squeegee, or a real leak would all make actual
+consumption diverge from the nominal rate, and a model with no ground
+truth has no way to notice. So `hal/floorbot.py` now tracks
+`_active_minutes_since_refill` and derives a continuous estimate
+(`usage_model_pct = 100 * (1 - active_minutes / water_hours*60)`), but
+**clamps it every reading to the range the robot's own coarse bucket
+still supports** (`bucket_pct_bounds()`). Between bucket transitions the
+reported `water_pct` now moves smoothly with actual usage instead of
+jumping only when the bucket itself changes; at each bucket reading, it's
+snapped back to what the real (if coarse) sensor confirms, so the model
+can never wander further from reality than one bucket-width.
+
+**The gap between the two signals is itself useful.** `water_model_bucket_drift_pct`
+(how far the raw usage-time model sat from the bucket-clamped value before
+clamping) is exposed in `meta` and checked in
+`Monitor._check_water_anomaly`: a large, persistent gap means usage-time
+alone no longer explains what the sensor is reporting -- exactly the
+leak/sensor-fault signature the R-008 scripted disruption represents, now
+detectable from ordinary telemetry rather than only when scripted. Wiring
+`replanner.handle_water_anomaly` to run its forced reading through
+`monitor.ingest()` (not just its own hand-authored `flag_anomaly` call)
+confirms this: **both the scripted flag and the automatic
+`water_model_bucket_divergence` flag fire on the same event**, which is
+the useful validation -- the general-purpose detector independently
+catches the same anomaly the disruption script asserts, so the mechanism
+isn't just tuned to a demo, it works against a different signal entirely
+(bucket vs. drift) hitting the same conclusion.
+
+**Deliberately NOT changed: the return-trigger policy.**
+`dispatcher.wants_return_now()` still keys off the raw bucket
+(`bucket in ("low", "empty")`), not the fused estimate, and that's on
+purpose -- #8's conservative policy exists specifically because a single
+coarse reading can't be trusted for a safety-relevant decision (running
+the tank dry). The fused estimate makes the *dashboard and anomaly
+detection* smarter; it does not make the *dispatch trigger* more
+aggressive. Those are different consumers of the same signal with
+different risk tolerances, and conflating them would quietly undo #8's
+whole rationale.
+
+**A genuine edge case caught during implementation, worth naming:**
+resetting the usage clock on "status just left WATER_CYCLE/DOCK_SERVICE"
+sounds right but isn't -- the true tank level rises continuously
+*during* a refill while the bucket only updates once it crosses each
+threshold, so a status-transition-based reset produces a real but
+spurious divergence flag on every single dock stop (caught by seeing it
+fire 7 minutes in a row in the shift log). Fixed by tying the reset to
+the physical tank state directly (`water_pct >= 99.5`) instead of a
+status-transition heuristic, and by excluding `WATER_CYCLE`/
+`DOCK_SERVICE` from the drift check entirely in `Monitor` -- mid-refill
+telemetry is a transient by construction, not a signal to alarm on.
+
+## 10. Scripted vs. emergent disruptions in the demo
 
 Two of the five required disruptions emerge **organically** from the
 simulated physics with zero scripting: R-001 running its water tank dry
@@ -243,7 +361,7 @@ instead fires the WS-drop during whichever CleanPath robot's actual
 cleaning window it falls in, which is the more honest way to exercise the
 same mechanism.
 
-## 9. R-001 vs. R-006 to the offline garage (Z8)
+## 11. R-001 vs. R-006 to the offline garage (Z8)
 
 The assignment brief is internally inconsistent here: Section 3's bullet
 list says *"R-001 is dispatched to Z8,"* but the detailed sample-timeline
@@ -255,7 +373,7 @@ specific and names the OEM), so this system's scheduler prefers hard-scrub
 capable robots for the concrete garage floor, which in practice assigns a
 FloorBot. This ambiguity is called out here rather than silently resolved.
 
-## 10. No LLM component
+## 12. No LLM component
 
 Per the assignment: *"If you use LLMs for any component, explain what they
 handle vs. deterministic code."* This system uses **no LLM anywhere** --
@@ -279,14 +397,14 @@ handling) is deterministic threshold/rule-based code. Reasons:
   of an otherwise-untouched decision layer, and the assignment says
   explicitly that production UI isn't part of what's being evaluated.
 
-## 11. ML for scheduling optimization
+## 13. ML for scheduling optimization
 
 Not used. The fleet/zone count (8 and 8) doesn't benefit from a learned
 model over a simple heuristic or solver, and there's no training data (a
 single simulated night) to learn from responsibly. The one place ML is
-explicitly designed for but not implemented is anomaly detection (see #12).
+explicitly designed for but not implemented is anomaly detection (see #14).
 
-## 12. Anomaly detection: threshold-based now, ML-shaped data model
+## 14. Anomaly detection: threshold-based now, ML-shaped data model
 
 Per the rubric: *"Threshold-based is fine, but design the telemetry data
 model so ML-based anomaly detection could be added later."* `Monitor`
@@ -298,7 +416,7 @@ drain-rate or leak classifier. The threshold checks in
 model call; swapping them out would not require touching the schema, only
 the function body.
 
-## 13. Persistence granularity: shift-boundary, not mid-tick
+## 15. Persistence granularity: shift-boundary, not mid-tick
 
 Per the rubric: *"State must persist across restarts."* This orchestrator
 is a nightly batch scheduler -- the realistic restart scenario is "the
@@ -319,23 +437,26 @@ Dispatcher) wasn't justified by the assignment's 6-8 hour scope for a
 failure mode (mid-shift process crash) that's a small fraction of the
 realistic restart cases.
 
-## 14. Robot simulator fidelity
+## 16. Robot simulator fidelity
 
 Travel between zones is modeled as a flat cost (5 min, 2% battery) per the
 spec, applied once at the start of a transition rather than drained
 per-minute, because the assignment specifies it as a flat transition cost,
-not a rate. Charging follows a two-phase CC/CV curve rather than a flat
-rate, and the dock-service policy targets 90% rather than 100% -- see #3
-for the full rationale and measured impact. Water refill is a fixed
-10-minute cycle regardless of starting level (per spec -- "dump + refill,"
-not proportional to how empty the tank was; unlike charging, the
+not a rate -- except for dock-service legs specifically, which run faster
+(transport mode; see #4). Charging follows a two-phase CC/CV curve rather
+than a flat rate, and the dock-service policy targets 90% rather than
+100% -- see #3 for the full rationale and measured impact. Water refill is
+a fixed 10-minute cycle regardless of starting level (per spec -- "dump +
+refill," not proportional to how empty the tank was; unlike charging, the
 assignment doesn't suggest water refill has a comparable slow-taper
-physical mechanism, so it stays flat-rate). Security escort delay is
-modeled as `random.uniform(0, 10)` minutes for any zone entry after 23:00,
-seeded for reproducibility, with the Z5 disruption overriding it to a
-forced 25 minutes for that one event.
+physical mechanism, so the refill duration itself stays flat-rate -- what
+FloorBot's *reported percentage* means between refills is a separate
+question, addressed in #9). Security escort delay is modeled as
+`random.uniform(0, 10)` minutes for any zone entry after 23:00, seeded for
+reproducibility, with the Z5 disruption overriding it to a forced 25
+minutes for that one event.
 
-## 15. What's intentionally not handled
+## 17. What's intentionally not handled
 
 Per the rubric's own "What We Don't Care About": no production UI (this is
 a CLI + JSON), no real OEM API integration (all three are simulated), and

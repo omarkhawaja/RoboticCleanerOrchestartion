@@ -24,6 +24,12 @@ from typing import Dict, List, Optional
 from .models import OEM, RobotSpec, RobotStatus, Telemetry, ZoneStatus, fmt_time
 
 SLA_CLASSES = {"Sterile", "High-traffic"}
+# Model-vs-bucket water divergence worth flagging (see FloorBot's
+# water_model_bucket_drift_pct meta field in _check_water_anomaly). Lives
+# here, not in hal/floorbot.py, because it's a Monitor-side judgment call
+# about what counts as anomalous, not physics the adapter should decide --
+# Monitor stays generic over telemetry, never importing an OEM module.
+FLOORBOT_DRIFT_ANOMALY_PCT = 15.0
 
 
 @dataclass
@@ -135,6 +141,36 @@ class Monitor:
             self.flag_anomaly(telem.timestamp, telem.robot_id, "water_reading_inconsistent",
                               f"water level rose {-observed_drop:.0f}% outside a water cycle -- "
                               f"treat as sensor noise, not a real refill", confidence="low")
+
+        # FloorBot only: the usage-time model (hal/floorbot.py) and the
+        # robot's own coarse bucket reading should roughly agree. A large,
+        # persistent gap between "how much water usage-time says should be
+        # left" and "what the bucket sensor actually confirms" is itself an
+        # anomaly signal -- generalizes the same leak/sensor-fault reasoning
+        # used for the scripted R-008 disruption into something that fires
+        # organically off real telemetry, not just a scripted override.
+        #
+        # Skip this check entirely while a refill is in progress
+        # (WATER_CYCLE/DOCK_SERVICE): the true tank level is rising
+        # continuously as it refills, so the bucket crosses its thresholds
+        # mid-cycle while the usage-time clock (frozen, since no cleaning
+        # is happening) hasn't caught up yet -- that mismatch is expected
+        # and mechanical, not a leak or a sensor fault, and would otherwise
+        # false-positive on every single dock stop.
+        drift = telem.meta.get("water_model_bucket_drift_pct")
+        if (drift is not None and abs(drift) > FLOORBOT_DRIFT_ANOMALY_PCT
+                and telem.status not in (RobotStatus.WATER_CYCLE, RobotStatus.DOCK_SERVICE)):
+            usage_pct = telem.meta.get("water_usage_model_pct")
+            bucket = telem.meta.get("water_bucket")
+            if drift > 0:
+                detail = (f"usage-time model expects ~{usage_pct:.0f}% remaining, but the '{bucket}' bucket "
+                          f"reading caps it at {usage_pct - drift:.0f}% -- draining faster than active-cleaning "
+                          f"time alone explains (possible leak).")
+            else:
+                detail = (f"usage-time model expects ~{usage_pct:.0f}% remaining, well below what the '{bucket}' "
+                          f"bucket reading still supports -- bucket may be stuck or lagging real usage.")
+            self.flag_anomaly(telem.timestamp, telem.robot_id, "water_model_bucket_divergence",
+                              detail, confidence="medium")
 
     def oem_health(self) -> Dict[str, dict]:
         out: Dict[str, dict] = {}

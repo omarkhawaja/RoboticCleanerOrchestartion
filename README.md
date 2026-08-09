@@ -96,7 +96,10 @@ schema. Scheduler, Dispatcher, Monitor, and Replanner never import
 `autoscrub.py`, `cleanpath.py`, or `floorbot.py` directly -- only
 `hal/registry.py` does. **Adding a 4th OEM is writing one adapter file and
 adding one line to the registry's lookup table** (verified by
-`tests/test_basic.py::test_fourth_oem_is_a_pure_addition`).
+`tests/test_basic.py::test_fourth_oem_is_a_pure_addition`). See
+`hal/_template_adapter.py` for a copy-paste starting point -- a stub with
+`NotImplementedError` bodies and a quirk-handling checklist at each spot
+an OEM's real behavior would go.
 
 ### Module map
 
@@ -104,7 +107,7 @@ adding one line to the registry's lookup table** (verified by
 |---|---|
 | `fleet_orchestrator/models.py` | Common data model + the normalized `Telemetry` schema |
 | `fleet_orchestrator/facility.py` | Hospital zones, fleet roster, capability/eligibility rules |
-| `fleet_orchestrator/hal/` | `base.py` (interface + shared physics), one adapter per OEM, `registry.py` (factory) |
+| `fleet_orchestrator/hal/` | `base.py` (interface + shared physics), one adapter per OEM, `registry.py` (factory), `_template_adapter.py` (copy-paste stub for a 4th OEM) |
 | `fleet_orchestrator/scheduler.py` | Nightly assignment plan generator (the heuristic, with objective function documented in the module docstring) |
 | `fleet_orchestrator/dispatcher.py` | Per-minute FSM that executes the plan and reacts to physics in real time |
 | `fleet_orchestrator/monitor.py` | Telemetry ingestion, fleet/zone dashboards, anomaly detection, shift report |
@@ -146,9 +149,12 @@ Kept out of this README on purpose -- see **[SPEC.md](SPEC.md)** for the
 full discussion of: the objective function and the 140-shift empirical
 study backing it (water binds 100% of the time, battery never does), the
 non-linear CC/CV charging curve and the redeploy-at-90% dispatch policy it
-justifies (+24% fleet-wide schedule slack, measured), why the scheduler is
-a greedy heuristic instead of an ILP solver, the FloorBot water-uncertainty
-policy (conservative vs. aggressive), scripted vs. emergent disruptions,
-the persistence granularity tradeoff, why no LLM component was used, and
-every place the assignment brief was ambiguous
-and what assumption was made.
+justifies, the transport-mode-vs-scrubbing-mode travel speed distinction
+for dock-service legs (both measured, +27% fleet-wide schedule slack
+combined), the FloorBot usage-time water estimator that fuses the coarse
+bucket reading with a continuous usage-time model without changing the
+safety-relevant return-trigger policy, why the scheduler is a greedy
+heuristic instead of an ILP solver, the FloorBot water-uncertainty policy
+(conservative vs. aggressive), scripted vs. emergent disruptions, the
+persistence granularity tradeoff, why no LLM component was used, and every
+place the assignment brief was ambiguous and what assumption was made.

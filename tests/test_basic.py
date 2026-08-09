@@ -13,10 +13,12 @@ from fleet_orchestrator.dispatcher import FleetDispatcher
 from fleet_orchestrator.hal.base import (
     CHARGE_CC_LIMIT_PCT,
     CHARGE_DISPATCH_TARGET_PCT,
+    TRAVEL_MINUTES,
+    TRAVEL_MINUTES_DOCK,
     charge_minutes_to_target,
     charge_pct_after,
 )
-from fleet_orchestrator.hal.floorbot import bucket_to_minutes_range, pct_to_bucket
+from fleet_orchestrator.hal.floorbot import bucket_pct_bounds, bucket_to_minutes_range, pct_to_bucket
 from fleet_orchestrator.hal.registry import build_adapter
 from fleet_orchestrator.models import OEM, RobotStatus
 from fleet_orchestrator.monitor import Monitor
@@ -192,6 +194,108 @@ class TestChargingCurve(unittest.TestCase):
         # under the old target-100% policy this would read ~98%.
         self.assertGreaterEqual(redeploy_battery, 85.0)
         self.assertLess(redeploy_battery, 95.0)
+
+
+class TestTransportModeTravel(unittest.TestCase):
+    """Dock-service legs (zone->dock, dock->zone) run at transport-mode
+    speed, faster than the baseline zone-to-zone transition cost."""
+
+    def test_dock_leg_is_faster_than_baseline(self):
+        self.assertLess(TRAVEL_MINUTES_DOCK, TRAVEL_MINUTES)
+
+    def test_dock_return_uses_the_fast_leg(self):
+        fleet = {"R-001": facility.build_fleet()["R-001"]}
+        zones = {"Z1": facility.build_zones()["Z1"]}
+        schedule = {"R-001": [Assignment("Z1", "R-001", 0, 500.0)]}
+        monitor = Monitor(fleet)
+        rng = random.Random(1)
+        adapters = {"R-001": build_adapter(fleet["R-001"])}
+        dispatcher = FleetDispatcher(fleet, adapters, schedule, zones, monitor, replanner, rng)
+        ctrl = dispatcher.controller("R-001")
+        for _ in range(200):
+            dispatcher.step()
+            if ctrl.travel_destination == "DOCK" and ctrl.phase == "TRAVEL":
+                self.assertEqual(ctrl.phase_timer, TRAVEL_MINUTES_DOCK)
+                return
+        self.fail("robot never returned to dock within 200 ticks")
+
+
+class TestFloorBotWaterEstimator(unittest.TestCase):
+    """Usage-time model fused with the coarse bucket reading -- a
+    continuous estimate clamped to what the bucket actually supports."""
+
+    def test_fresh_robot_reports_full_water_no_drift(self):
+        spec = facility.build_fleet()["R-006"]
+        adapter = build_adapter(spec)
+        telem = adapter.status_query()
+        self.assertAlmostEqual(telem.water_pct, 100.0, delta=0.5)
+        self.assertEqual(telem.meta["water_model_bucket_drift_pct"], 0.0)
+
+    def test_usage_model_decreases_while_cleaning(self):
+        spec = facility.build_fleet()["R-006"]
+        adapter = build_adapter(spec)
+        adapter.phys.status = RobotStatus.CLEANING
+        adapter.phys.position = "Z1"
+        for _ in range(20):
+            adapter.tick(1.0)
+        telem = adapter.status_query()
+        self.assertLess(telem.water_pct, 100.0)
+        self.assertLess(telem.meta["water_usage_model_pct"], 100.0)
+
+    def test_fused_estimate_never_leaves_the_bucket_range(self):
+        spec = facility.build_fleet()["R-006"]
+        adapter = build_adapter(spec)
+        adapter.phys.status = RobotStatus.CLEANING
+        adapter.phys.position = "Z1"
+        for _ in range(90):  # a full tank's worth of active cleaning
+            adapter.tick(1.0)
+            telem = adapter.status_query()
+            lo, hi = bucket_pct_bounds(telem.meta["water_bucket"])
+            self.assertGreaterEqual(telem.water_pct, lo - 0.01)
+            self.assertLessEqual(telem.water_pct, hi + 0.01)
+
+    def test_usage_clock_resets_once_tank_is_physically_full(self):
+        spec = facility.build_fleet()["R-006"]
+        adapter = build_adapter(spec)
+        adapter.phys.status = RobotStatus.CLEANING
+        adapter.phys.position = "Z1"
+        for _ in range(30):
+            adapter.tick(1.0)
+        self.assertGreater(adapter._active_minutes_since_refill, 0.0)
+        # simulate a completed refill: tank physically back to 100%
+        adapter.phys.status = RobotStatus.DOCK_SERVICE
+        adapter.phys.water_pct = 100.0
+        adapter.tick(1.0)
+        self.assertEqual(adapter._active_minutes_since_refill, 0.0)
+
+    def test_monitor_flags_large_model_bucket_divergence(self):
+        fleet = {"R-006": facility.build_fleet()["R-006"]}
+        monitor = Monitor(fleet)
+        spec = fleet["R-006"]
+        adapter = build_adapter(spec)
+        adapter.phys.status = RobotStatus.CLEANING
+        adapter.phys.position = "Z1"
+        monitor.ingest(adapter.status_query(), spec)  # baseline sample
+        adapter.forced_bucket_override = "low"        # sensor says far less than usage implies
+        monitor.ingest(adapter.status_query(), spec)
+        kinds = [a["kind"] for a in monitor.anomalies]
+        self.assertIn("water_model_bucket_divergence", kinds)
+
+    def test_monitor_does_not_flag_divergence_mid_refill(self):
+        fleet = {"R-006": facility.build_fleet()["R-006"]}
+        monitor = Monitor(fleet)
+        spec = fleet["R-006"]
+        adapter = build_adapter(spec)
+        adapter.phys.status = RobotStatus.CLEANING
+        adapter.phys.position = "Z1"
+        for _ in range(60):  # drain most of the tank
+            adapter.tick(1.0)
+        monitor.ingest(adapter.status_query(), spec)
+        adapter.phys.status = RobotStatus.DOCK_SERVICE  # now mid-refill: bucket will jump ahead of the model
+        adapter.tick(5.0)
+        monitor.ingest(adapter.status_query(), spec)
+        kinds = [a["kind"] for a in monitor.anomalies]
+        self.assertNotIn("water_model_bucket_divergence", kinds)
 
 
 class TestReplanner(unittest.TestCase):

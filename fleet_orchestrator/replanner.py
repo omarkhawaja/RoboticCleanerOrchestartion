@@ -74,6 +74,12 @@ def handle_robot_failure(dispatcher, monitor, robot_id: str, t: float, error_cod
 def handle_water_anomaly(dispatcher, monitor, robot_id: str, t: float) -> str:
     ctrl = dispatcher.controller(robot_id)
     ctrl.adapter.forced_bucket_override = "low"  # what the coarse sensor "reports" this instant
+    # Feed this reading through the normal ingestion path too, not just the
+    # hand-authored flag_anomaly() below -- Monitor's own usage-time-vs-
+    # bucket drift check (see monitor.py) should independently catch this
+    # same event from the telemetry alone, the way it would organically in
+    # a real deployment with no scripted trigger at all.
+    monitor.ingest(ctrl.adapter.status_query(), ctrl.spec)
     monitor.flag_anomaly(
         t, robot_id, "water_anomaly_injected",
         "reports water bucket 'low' only ~20 min after a full refill -- inconsistent with the expected "
