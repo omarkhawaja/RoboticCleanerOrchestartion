@@ -54,7 +54,15 @@ class RobotController:
         self.current: Optional[Assignment] = None
         self.phase = "IDLE"
         self.phase_timer = 0.0
-        self.last_classification: Optional[str] = None
+        # Dock is non-sterile (it's a maintenance area, not a patient-care
+        # zone), so a robot's very first zone of the night is a real
+        # non-sterile->sterile transition if that first zone is sterile --
+        # not "no transition happened yet." Seeding this as "Standard"
+        # rather than None is what makes the sanitization cycle actually
+        # fire before a sterile-certified robot's first sterile zone of the
+        # shift, matching the assignment's own sample timeline ("11:00 PM
+        # -- R-003 begins sterile zones. Sanitization cycle before Z7").
+        self.last_classification: str = "Standard"
         self.resume_zone: Optional[str] = None  # zone to travel back to after a dock stop
         self.pending_binding_reason: Optional[str] = None
 
@@ -107,7 +115,7 @@ class RobotController:
             return False
         was_sterile = self.last_classification == "Sterile"
         is_sterile = zone.classification == "Sterile"
-        return was_sterile != is_sterile and self.last_classification is not None
+        return was_sterile != is_sterile
 
     def needs_escort_wait(self, t: float, zone: Zone) -> float:
         if zone.zone_id in self.escort_override:

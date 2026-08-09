@@ -120,6 +120,32 @@ class TestScheduler(unittest.TestCase):
                     self.assertNotEqual(zones[a.zone_id].classification, "Sterile")
 
 
+class TestSanitization(unittest.TestCase):
+    """Dock is a non-sterile area, so a sterile-certified robot's very
+    first zone of the night must trigger a sanitization cycle if that
+    first zone is sterile -- not skip it just because there's no "previous
+    zone" yet. (Regression: last_classification used to seed as None, and
+    needs_sanitization() had a `last_classification is not None` guard
+    that silently skipped the very first transition of the shift.)"""
+
+    def test_sanitization_fires_before_first_sterile_zone_of_the_night(self):
+        fleet = facility.build_fleet()
+        zones = facility.build_zones()
+        sterile_zone = zones["Z7"]
+        schedule = {"R-003": [Assignment("Z7", "R-003", 0, 30.0)]}
+        monitor = Monitor({"R-003": fleet["R-003"]})
+        rng = random.Random(1)
+        adapters = {"R-003": build_adapter(fleet["R-003"])}
+        dispatcher = FleetDispatcher({"R-003": fleet["R-003"]}, adapters, schedule,
+                                     {"Z7": sterile_zone}, monitor, replanner, rng)
+        ctrl = dispatcher.controller("R-003")
+        for _ in range(30):
+            dispatcher.step()
+            if ctrl.phase == "SANITIZE":
+                return
+        self.fail("R-003 never sanitized before its first (sterile) zone of the shift")
+
+
 class TestDualConstraint(unittest.TestCase):
     """A scrubber with limited water must not clean past its tank -- the
     dispatcher should insert a water cycle, not silently let water go negative."""

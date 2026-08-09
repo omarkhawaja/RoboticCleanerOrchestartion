@@ -490,7 +490,48 @@ question, addressed in #9). Security escort delay is modeled as
 reproducibility, with the Z5 disruption overriding it to a forced 25
 minutes for that one event.
 
-## 17. What's intentionally not handled
+## 17. Bug found by re-checking the system against the assignment's own sample timeline
+
+Directly re-running this system against the assignment's "Sample
+Simulation: One Night Shift" narrative (rather than just checking the
+final shift report) surfaced a real bug: step 6 says *"11:00 PM -- R-003
+begins sterile zones. Sanitization cycle before Z7"* -- but the very
+first sterile zone of the night was NOT triggering sanitization.
+
+**Root cause:** `RobotController.last_classification` was seeded as
+`None`, and `needs_sanitization()` had an explicit
+`and self.last_classification is not None` guard -- meaning "no previous
+zone recorded yet" was being treated as "no transition happened," so the
+very first zone of a sterile-certified robot's night silently skipped the
+sanitization cycle no matter what it was. Every *subsequent* transition
+worked correctly; only the first one of the shift was wrong, which is
+exactly the kind of off-by-one-at-the-boundary bug that's easy to miss
+because most of the system's own tests and the shift report don't
+distinguish "sanitized before the 1st sterile zone" from "sanitized
+before the 2nd."
+
+**Why it's wrong, not just incomplete:** the dock is a non-sterile area
+(a maintenance/charging area, not a patient-care zone) -- so a robot's
+first zone of the night genuinely is a non-sterile-to-sterile transition
+if that first zone happens to be sterile, not an undefined edge case that
+should be skipped.
+
+**Fix:** seed `last_classification` as `"Standard"` (dock is non-sterile)
+instead of `None`, and drop the now-unnecessary `is not None` guard. One
+line changed in the seed, one line simplified in the check. Verified with
+a direct trace re-run (`R-003: sanitization cycle before entering Z7`
+now appears at 23:00, matching the narrative's 11:00 PM beat) and a new
+regression test, `tests/test_basic.py::TestSanitization`.
+
+**Why this is worth naming explicitly:** it's a concrete answer to "would
+this actually work against the sample simulation" that isn't just "yes" --
+the honest answer is "yes, and re-checking it against the assignment's
+own narrative line-by-line (not just trusting the final report looked
+right) is what caught a real bug," which is a more useful thing to be
+able to say in a walkthrough than a system that's never been checked that
+closely.
+
+## 18. What's intentionally not handled
 
 Per the rubric's own "What We Don't Care About": no production UI (this is
 a CLI + JSON), no real OEM API integration (all three are simulated), and
