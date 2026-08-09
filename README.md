@@ -110,12 +110,13 @@ an OEM's real behavior would go.
 | `fleet_orchestrator/hal/` | `base.py` (interface + shared physics), one adapter per OEM, `registry.py` (factory), `_template_adapter.py` (copy-paste stub for a 4th OEM) |
 | `fleet_orchestrator/scheduler.py` | Nightly assignment plan generator (the heuristic, with objective function documented in the module docstring) |
 | `fleet_orchestrator/dispatcher.py` | Per-minute FSM that executes the plan and reacts to physics in real time |
-| `fleet_orchestrator/monitor.py` | Telemetry ingestion, fleet/zone dashboards, anomaly detection, shift report |
+| `fleet_orchestrator/monitor.py` | Telemetry ingestion, fleet/zone dashboards, ETA-to-next-stop, anomaly detection, shift report |
+| `fleet_orchestrator/profile.py` | Cross-shift consumable profiling: trip-normalized rates, learned ETA, degradation + peer-outlier detection |
 | `fleet_orchestrator/replanner.py` | The 5 disruption handlers (detect -> assess -> decide -> act -> log) |
 | `fleet_orchestrator/persistence.py` | JSON state snapshot/restore across restarts |
 | `fleet_orchestrator/scenario.py` | The scripted Tuesday-night simulation (schedule + disruption timeline) |
-| `main.py` | CLI entrypoint |
-| `tests/test_basic.py` | HAL normalization, scheduler eligibility, dual-constraint, replanner tests |
+| `main.py` | CLI entrypoint (`--profile-db PATH` to accumulate a cross-shift profile store) |
+| `tests/test_basic.py` | HAL normalization, scheduler eligibility, dual-constraint, replanner, consumable-profile tests |
 
 ## Sample output (abridged)
 
@@ -153,8 +154,12 @@ justifies, the transport-mode-vs-scrubbing-mode travel speed distinction
 for dock-service legs (both measured, +27% fleet-wide schedule slack
 combined), the FloorBot usage-time water estimator that fuses the coarse
 bucket reading with a continuous usage-time model without changing the
-safety-relevant return-trigger policy, why the scheduler is a greedy
-heuristic instead of an ILP solver, the FloorBot water-uncertainty policy
-(conservative vs. aggressive), scripted vs. emergent disruptions, the
-persistence granularity tradeoff, why no LLM component was used, and every
-place the assignment brief was ambiguous and what assumption was made.
+safety-relevant return-trigger policy, the cross-shift consumable-profile
+system (trip-normalized rates, learned ETA, degradation and same-OEM/model
+peer-outlier detection -- validated against two distinct synthetic fault
+shapes in `analysis/consumable_profile_demo.py`), why the scheduler is a
+greedy heuristic instead of an ILP solver, the FloorBot water-uncertainty
+policy (conservative vs. aggressive), scripted vs. emergent disruptions,
+the persistence granularity tradeoff, why no LLM component was used, and
+every place the assignment brief was ambiguous and what assumption was
+made.

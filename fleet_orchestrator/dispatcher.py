@@ -321,6 +321,20 @@ class RobotController:
         self._log(t, msg)
         if self.monitor:
             self.monitor.log_disruption(t, "OFFLINE RECONCILE", f"{self.spec.robot_id} reconnected", msg)
+            # "Reconciling" has to actually mean something: feed the
+            # buffered samples into Monitor now, in their original
+            # chronological order, so this stretch of work isn't silently
+            # lost from telemetry history -- anomaly detection and trip
+            # profiling both read Monitor.history, and an offline-mission
+            # robot (FloorBot on garage duty, most likely candidate for
+            # exactly the leak-detection this system is trying to do) would
+            # otherwise never accumulate any consumption profile at all,
+            # since no ingest() happens while offline_active is True. Any
+            # anomaly found here is correctly timestamped to when it
+            # actually happened, even though it's only detected now --
+            # that's the honest story for a robot with no live link.
+            for buffered in self.offline_buffer:
+                self.monitor.ingest(buffered, self.spec)
         self.offline_active = False
 
 

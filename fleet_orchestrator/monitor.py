@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .models import OEM, RobotSpec, RobotStatus, Telemetry, ZoneStatus, fmt_time
+from .profile import minutes_remaining
 
 SLA_CLASSES = {"Sterile", "High-traffic"}
 # Model-vs-bucket water divergence worth flagging (see FloorBot's
@@ -30,6 +31,14 @@ SLA_CLASSES = {"Sterile", "High-traffic"}
 # about what counts as anomalous, not physics the adapter should decide --
 # Monitor stays generic over telemetry, never importing an OEM module.
 FLOORBOT_DRIFT_ANOMALY_PCT = 15.0
+
+# ETA-to-next-stop thresholds. These are DISPLAY estimates, deliberately
+# not imported from dispatcher.py (Monitor never depends on Dispatcher --
+# wrong layering direction) -- they mirror dispatcher.BATTERY_RETURN_PCT
+# and the conservative water policy but are not the actual trigger logic,
+# which for FloorBot is bucket-based (see dispatcher.wants_return_now).
+ETA_BATTERY_STOP_PCT = 12.0
+ETA_WATER_STOP_PCT = 5.0
 
 
 @dataclass
@@ -44,6 +53,15 @@ class RobotSnapshot:
     status: RobotStatus = RobotStatus.IDLE
     last_update_t: int = 0
     error_codes: List[str] = field(default_factory=list)
+    # Tier 1: estimated active-cleaning minutes remaining before this robot
+    # must stop for battery/water. `*_source` is "learned" (from a
+    # ProfileStore's own recent trip history) or "spec" (the OEM's nominal
+    # rated rate, used until enough trip history exists to trust a learned
+    # one) -- surfaced so a reader can tell which one they're looking at.
+    eta_battery_min: Optional[float] = None
+    eta_battery_source: Optional[str] = None
+    eta_water_min: Optional[float] = None
+    eta_water_source: Optional[str] = None
 
 
 @dataclass
@@ -58,7 +76,7 @@ class ZoneRecord:
 
 
 class Monitor:
-    def __init__(self, fleet: Dict[str, RobotSpec]):
+    def __init__(self, fleet: Dict[str, RobotSpec], profile_store=None):
         self.fleet = fleet
         self.robots: Dict[str, RobotSnapshot] = {
             rid: RobotSnapshot(rid, spec.oem) for rid, spec in fleet.items()
@@ -67,6 +85,12 @@ class Monitor:
         self.history: Dict[str, List[Telemetry]] = defaultdict(list)
         self.anomalies: List[dict] = []
         self.disruption_log: List[dict] = []
+        # Optional ProfileStore (profile.py) -- when attached, ETA
+        # computation prefers a robot's own learned trip-history rate over
+        # the OEM's nominal spec rate. None is a fully valid mode (falls
+        # straight back to spec-rate ETA, still correct, just less precise
+        # until multi-shift history accumulates) -- see profile.py.
+        self.profile_store = profile_store
 
     # -- ingestion -----------------------------------------------------
     def ingest(self, telem: Telemetry, spec: RobotSpec):
@@ -80,7 +104,34 @@ class Monitor:
         snap.status = telem.status
         snap.last_update_t = telem.timestamp
         snap.error_codes = telem.error_codes
+
+        batt_rate, batt_src = self._resource_rate(telem.robot_id, spec, "battery")
+        snap.eta_battery_min = minutes_remaining(telem.battery_pct, ETA_BATTERY_STOP_PCT, batt_rate)
+        snap.eta_battery_source = batt_src if snap.eta_battery_min is not None else None
+        if telem.water_pct is not None:
+            water_rate, water_src = self._resource_rate(telem.robot_id, spec, "water")
+            snap.eta_water_min = minutes_remaining(telem.water_pct, ETA_WATER_STOP_PCT, water_rate)
+            snap.eta_water_source = water_src if snap.eta_water_min is not None else None
+        else:
+            snap.eta_water_min = None
+            snap.eta_water_source = None
+
         self._check_water_anomaly(telem, spec)
+
+    def _resource_rate(self, robot_id: str, spec: RobotSpec, resource: str):
+        """(rate_per_60min, source) -- Tier 1/Tier 2 tie-in: prefer a
+        robot's own learned rate (profile.py) once it has enough trip
+        history, else fall back to the OEM's nominal spec rate. This is
+        the one place ETA and the learned-profile system actually meet."""
+        if self.profile_store is not None:
+            learned = self.profile_store.learned_rate(robot_id, resource)
+            if learned is not None and learned > 0:
+                return learned, "learned"
+        if resource == "battery":
+            return 100.0 / spec.battery_hours, "spec"
+        if resource == "water" and spec.water_hours:
+            return 100.0 / spec.water_hours, "spec"
+        return None, None
 
     def on_zone_event(self, zone_id: str, status: ZoneStatus, t: float, role: str = "primary",
                        robot_id: str = "", coverage: Optional[float] = None):
@@ -273,6 +324,9 @@ class Monitor:
             if s.water_pct is not None:
                 water_str = f"{s.water_bucket}(~{s.water_pct:.0f}%,uncertain)" if s.water_uncertain \
                     else f"{s.water_pct:.0f}%"
-            lines.append(f"  {rid:6} [{s.oem.value:10}] batt={s.battery_pct:5.1f}%  water={water_str:22} "
+            eta_batt = f"{s.eta_battery_min:.0f}m[{s.eta_battery_source}]" if s.eta_battery_min is not None else "--"
+            eta_water = f"{s.eta_water_min:.0f}m[{s.eta_water_source}]" if s.eta_water_min is not None else "--"
+            lines.append(f"  {rid:6} [{s.oem.value:10}] batt={s.battery_pct:5.1f}% next_stop={eta_batt:14} "
+                         f"water={water_str:22} next_stop={eta_water:14} "
                          f"pos={s.position:10} status={s.status.value:14} @ {fmt_time(s.last_update_t)}")
         return "\n".join(lines)

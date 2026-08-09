@@ -436,9 +436,108 @@ handling) is deterministic threshold/rule-based code. Reasons:
 Not used. The fleet/zone count (8 and 8) doesn't benefit from a learned
 model over a simple heuristic or solver, and there's no training data (a
 single simulated night) to learn from responsibly. The one place ML is
-explicitly designed for but not implemented is anomaly detection (see #14).
+explicitly designed for but not implemented is anomaly detection (see #15).
 
-## 14. Anomaly detection: threshold-based now, ML-shaped data model
+## 14. Consumable profiling: trip-normalized rates, degradation & peer-outlier detection
+
+This closes two gaps flagged in an earlier review: **"estimated time to
+next stop"** wasn't surfaced anywhere despite the dispatcher already
+computing the underlying rate internally, and **battery aging** was
+explicitly documented as unimplemented, blocked on not having a
+multi-shift consumption history to compare against. Both come from the
+same underlying idea: track each robot's *own observed* consumption
+instead of only trusting the OEM's *rated* spec number, and persist it
+across shifts so "is this getting worse" is answerable at all.
+
+**The normalization problem, and why it's the actual hard part.** Raw
+per-tick telemetry isn't directly comparable across trips: a 45-minute
+trip and a 90-minute trip used different total resource amounts for
+reasons that have nothing to do with the robot's health, and wall-clock
+trip length is inflated by travel/escort/dock time that consumes nothing
+at all. `profile.py::extract_trip_segments` cuts each robot's telemetry
+into continuous **active-use segments** -- exactly the stretches where
+`status` is `CLEANING` or `OFFLINE_MISSION`, i.e. actually consuming a
+resource -- and reports a normalized rate: **percent used per 60 active
+minutes**. "60 minutes of vacuuming today vs. 60 minutes of vacuuming
+yesterday," the way the assignment framed it, is precisely
+`battery_rate_per_60min` / `water_rate_per_60min` on a `TripSegment`.
+Verified against a real simulated shift: the normalized water rate for a
+1.5h-tank scrubber comes out to ~66.6-66.7%/60min regardless of whether
+the underlying trip was 65 or 87 active minutes long -- matching the
+nominal 100/1.5=66.67 spec rate almost exactly, which is exactly the
+"apples to apples" property normalization is supposed to buy.
+
+**Two comparisons, because they catch two different failure modes:**
+- **Self-baseline (`flag_degradation`):** this robot's recent trips vs.
+  its OWN earliest recorded trips. Catches a slow drift over many
+  shifts -- an aging battery, a slowly-worsening leak -- using nothing
+  but the robot's own history, no peer or spec value needed.
+- **Peer-outlier (`flag_peer_outlier`):** this robot vs. the pooled rate
+  of every OTHER robot sharing the same OEM **and** model (z-score
+  against peer variance, falling back to a flat ratio when the peer
+  group has ~zero variance to compute a z-score against). Catches a unit
+  that's *chronically* different from its siblings -- manufacturing
+  variance, a persistent config difference -- that a self-baseline check
+  would never see, because it never drifts, it's just always been that
+  way.
+
+**These are validated to actually be different, not just described
+that way.** `analysis/consumable_profile_demo.py` runs 20 shifts with two
+distinct synthetic fault shapes injected: R-001 starts healthy and its
+`battery_hours` ramps down over the second half (an aging signature) --
+caught by `flag_degradation`, correctly NOT caught by `flag_peer_outlier`
+(no same-model peer with trip data in this fleet). R-007 is ~35% worse
+than spec from shift 1, constant the whole time (a chronic/manufacturing
+signature) -- caught by `flag_peer_outlier` against its healthy sibling
+R-005 (both CleanPath CP-X1), correctly NOT caught by `flag_degradation`
+(there's no drift to detect; it was always this way). A control robot,
+R-005 itself, is never touched and correctly triggers neither check. Four
+independent assertions, not one lucky flag firing.
+
+**Honesty about what's synthetic vs. real:** this simulator's base
+physics use a constant nominal drain rate straight from the OEM spec
+(see #17) and do not model hardware aging on their own -- there's no
+mechanism for a battery to spontaneously get worse across simulated
+nights. The demo script's drift is injected on purpose, the same way the
+R-008 water-anomaly disruption is scripted elsewhere in this system: it
+proves the general-purpose detection mechanism is correct against a KNOWN
+trend, not that real degradation happens to occur in an ordinary run.
+
+**Tier 1 and Tier 2 meet at the ETA.** `Monitor._resource_rate` prefers a
+robot's own `learned_rate` (mean of its most recent trips, once any exist)
+over the OEM's nominal spec rate; `dashboard()` shows which source is
+active (`[learned]` vs `[spec]`) so a reader can tell whether a number
+reflects real observed behavior or is still falling back to the nameplate
+figure. `minutes_remaining()` explicitly estimates **active** minutes
+remaining assuming uninterrupted continued cleaning from now -- it does
+not attempt to forecast future travel/escort gaps between now and then,
+which aren't knowable in advance and would just be a second, unrelated
+estimate bolted onto this one.
+
+**A real bug found while wiring this up:** offline-mission robots
+(`OFFLINE_MISSION` status, e.g. FloorBot on Z8 garage duty) had their
+telemetry buffered but never actually fed into `Monitor` -- the
+"reconciling N buffered telemetry samples" log line was true in that the
+count was right, but nothing was ever ingested, so an offline-mission
+robot could never accumulate a trip profile at all, silently. Fixed in
+`dispatcher.py::_end_offline_mission` to actually replay the buffered
+samples into `monitor.ingest()`, in original chronological order, on
+reconnect -- each anomaly this surfaces is correctly timestamped to when
+it actually happened, even though it's only detected once the robot is
+back on the network, which is the honest story for a robot with no live
+link. Regression test:
+`tests/test_basic.py::test_offline_mission_telemetry_is_reconciled_not_lost`.
+
+**Persistence: flat JSON, not a real database.** `ProfileStore.save()`/
+`.load()` follow the same pattern as `persistence.py` -- a deliberately
+scoped-down choice (see #16 for the same tradeoff applied to shift state)
+rather than standing up SQLite or a real time-series store for an
+exercise of this size. The data model (`TripSegment` as a flat, normalized
+record) is exactly what a real database schema would look like; swapping
+the JSON file for an actual table is a persistence-layer change, not a
+data-model change.
+
+## 15. Anomaly detection: threshold-based now, ML-shaped data model
 
 Per the rubric: *"Threshold-based is fine, but design the telemetry data
 model so ML-based anomaly detection could be added later."* `Monitor`
@@ -448,9 +547,14 @@ exactly the shape a feature pipeline would want for training a per-robot
 drain-rate or leak classifier. The threshold checks in
 `Monitor._check_water_anomaly` are a placeholder for what would become a
 model call; swapping them out would not require touching the schema, only
-the function body.
+the function body. `profile.py`'s degradation/peer-outlier checks (#14)
+are a second generation of the same idea, still explicitly threshold-based
+(a ratio and a z-score, not a learned model) but a step closer -- they
+already operate on the kind of engineered feature (a normalized per-trip
+rate) a real model would actually want as input, rather than raw
+per-tick telemetry.
 
-## 15. Persistence granularity: shift-boundary, not mid-tick
+## 16. Persistence granularity: shift-boundary, not mid-tick
 
 Per the rubric: *"State must persist across restarts."* This orchestrator
 is a nightly batch scheduler -- the realistic restart scenario is "the
@@ -471,7 +575,7 @@ Dispatcher) wasn't justified by the assignment's 6-8 hour scope for a
 failure mode (mid-shift process crash) that's a small fraction of the
 realistic restart cases.
 
-## 16. Robot simulator fidelity
+## 17. Robot simulator fidelity
 
 Travel between zones is modeled as a flat cost (5 min, 2% battery) per the
 spec, applied once at the start of a transition rather than drained
@@ -490,7 +594,7 @@ question, addressed in #9). Security escort delay is modeled as
 reproducibility, with the Z5 disruption overriding it to a forced 25
 minutes for that one event.
 
-## 17. Bug found by re-checking the system against the assignment's own sample timeline
+## 18. Bug found by re-checking the system against the assignment's own sample timeline
 
 Directly re-running this system against the assignment's "Sample
 Simulation: One Night Shift" narrative (rather than just checking the
@@ -531,18 +635,22 @@ right) is what caught a real bug," which is a more useful thing to be
 able to say in a walkthrough than a system that's never been checked that
 closely.
 
-## 18. What's intentionally not handled
+## 19. What's intentionally not handled
 
 Per the rubric's own "What We Don't Care About": no production UI (this is
 a CLI + JSON), no real OEM API integration (all three are simulated), and
 not every conceivable edge case. Specific things noted rather than
 silently ignored:
-- Multi-night history (battery aging detection) isn't meaningfully
-  testable from a single simulated shift; `Monitor` is structured to
-  support it once `persistence.py`'s saved history spans multiple nights,
-  but no aging model is implemented.
+- ~~Multi-night history (battery aging detection) isn't meaningfully
+  testable from a single simulated shift~~ -- **addressed**: see #14,
+  `ProfileStore` persists trip history across shifts specifically to make
+  this answerable, with a real (if threshold-based, not ML) degradation
+  detector, tested against synthetic fault injection since the base
+  physics don't model aging on their own.
 - The scheduler doesn't rebalance robot wear (total hours/cycles) across
-  nights -- there's no multi-night state to rebalance against yet.
+  nights -- `ProfileStore` now has the underlying data (`n_trips`,
+  cumulative usage per robot) that a wear-balancing pass would need, but
+  the scheduler itself doesn't read it or factor it into assignment yet.
 - Freight-elevator transit time (+3 min between floors) is called out in
   the facility notes but not modeled as a distinct cost from the flat
   5-minute travel transition; folding it in would mean tracking which

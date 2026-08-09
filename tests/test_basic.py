@@ -20,8 +20,10 @@ from fleet_orchestrator.hal.base import (
 )
 from fleet_orchestrator.hal.floorbot import bucket_pct_bounds, bucket_to_minutes_range, pct_to_bucket
 from fleet_orchestrator.hal.registry import build_adapter
-from fleet_orchestrator.models import OEM, RobotStatus
+from fleet_orchestrator.models import OEM, RobotStatus, Telemetry
 from fleet_orchestrator.monitor import Monitor
+from fleet_orchestrator.profile import ProfileStore, extract_trip_segments, minutes_remaining
+from fleet_orchestrator.scenario import build_shift
 from fleet_orchestrator.scheduler import Assignment, generate_schedule
 import random
 
@@ -378,6 +380,136 @@ class TestReplanner(unittest.TestCase):
         dispatcher = FleetDispatcher(fleet, adapters, schedule, zones, monitor, replanner, rng)
         full, achievable = replanner.handle_adhoc_request(dispatcher, monitor, "Z1", t=0, window_end_t=60)
         self.assertGreater(achievable, 0)
+
+
+def _telem(t, battery_pct, water_pct, status):
+    return Telemetry(robot_id="R-X", timestamp=t, battery_pct=battery_pct, water_pct=water_pct,
+                     water_uncertain=False, position="Z1", status=status, error_codes=[], meta={})
+
+
+class TestConsumableProfile(unittest.TestCase):
+    """Trip segmentation, learned rates, and the two anomaly checks
+    (self-baseline degradation, same-OEM/model peer outlier) -- all
+    exercised against hand-built synthetic histories so degradation and
+    leaks can be proven to fire correctly without depending on this
+    simulator's physics actually modeling aging (it deliberately doesn't;
+    see SPEC.md)."""
+
+    def test_segmentation_normalizes_by_active_minutes_not_wall_clock(self):
+        # 30 active minutes, with travel/idle time on either side that
+        # must NOT count toward the rate.
+        history = [
+            _telem(0, 100.0, 100.0, RobotStatus.EN_ROUTE),
+            _telem(1, 98.0, 100.0, RobotStatus.CLEANING),   # active starts
+            _telem(31, 68.0, 70.0, RobotStatus.CLEANING),   # 30 active min later
+            _telem(32, 68.0, 70.0, RobotStatus.EN_ROUTE),   # active ends
+            _telem(40, 68.0, 70.0, RobotStatus.IDLE),
+        ]
+        segs = extract_trip_segments(history, "R-X", "AutoScrub", "AS-900")
+        self.assertEqual(len(segs), 1)
+        seg = segs[0]
+        self.assertEqual(seg.active_minutes, 30)
+        # 30% battery used over 30 active min -> 60%/60min, not diluted by the 40 wall-clock min
+        self.assertAlmostEqual(seg.battery_rate_per_60min, 60.0, delta=0.5)
+
+    def test_learned_rate_averages_recent_window(self):
+        store = ProfileStore()
+        for i, rate in enumerate([20.0, 22.0, 24.0, 26.0, 28.0, 100.0]):  # last one outside window=5
+            store.segments.append(_seg("R-001", "AutoScrub", "AS-900", battery_rate=rate, shift=i))
+        learned = store.learned_rate("R-001", "battery", window=5)
+        self.assertAlmostEqual(learned, statistics_mean([22.0, 24.0, 26.0, 28.0, 100.0]))
+
+    def test_flag_degradation_fires_on_synthetic_aging_drift(self):
+        store = ProfileStore()
+        # baseline ~25%/60min for the first 3 trips, drifting up to ~35%/60min for the last 3
+        rates = [25.0, 25.0, 25.0, 30.0, 33.0, 35.0]
+        for i, r in enumerate(rates):
+            store.segments.append(_seg("R-001", "AutoScrub", "AS-900", battery_rate=r, shift=i))
+        flag = store.flag_degradation("R-001", "battery")
+        self.assertIsNotNone(flag)
+        self.assertGreaterEqual(flag["ratio"], 1.25)
+
+    def test_flag_degradation_does_not_fire_on_stable_rate(self):
+        store = ProfileStore()
+        for i in range(8):
+            store.segments.append(_seg("R-001", "AutoScrub", "AS-900", battery_rate=25.0 + (i % 2), shift=i))
+        self.assertIsNone(store.flag_degradation("R-001", "battery"))
+
+    def test_flag_degradation_needs_minimum_history(self):
+        store = ProfileStore()
+        for i in range(3):  # below min_total=6
+            store.segments.append(_seg("R-001", "AutoScrub", "AS-900", battery_rate=25.0 + i * 20, shift=i))
+        self.assertIsNone(store.flag_degradation("R-001", "battery"))
+
+    def test_flag_peer_outlier_fires_for_a_bad_unit_among_healthy_siblings(self):
+        store = ProfileStore()
+        # R-006 and R-007 (siblings, same OEM+model) run a healthy ~66%/60min water rate
+        for i in range(6):
+            store.segments.append(_seg("R-006", "FloorBot", "FB-200", water_rate=66.0 + (i % 2), shift=i))
+            store.segments.append(_seg("R-007", "FloorBot", "FB-200", water_rate=66.0 + (i % 2), shift=i))
+        # R-008 (same OEM+model) is leaking: notably higher water rate every trip
+        for i in range(6):
+            store.segments.append(_seg("R-008", "FloorBot", "FB-200", water_rate=95.0, shift=i))
+        flag = store.flag_peer_outlier("R-008", oem="FloorBot", model="FB-200", resource="water")
+        self.assertIsNotNone(flag)
+        self.assertGreater(flag["own_rate_per_60min"], flag["peer_rate_per_60min"])
+
+    def test_flag_peer_outlier_does_not_fire_for_a_normal_unit(self):
+        store = ProfileStore()
+        for i in range(6):
+            store.segments.append(_seg("R-006", "FloorBot", "FB-200", water_rate=66.0 + (i % 2), shift=i))
+            store.segments.append(_seg("R-007", "FloorBot", "FB-200", water_rate=65.0 + (i % 2), shift=i))
+            store.segments.append(_seg("R-008", "FloorBot", "FB-200", water_rate=66.5 + (i % 2), shift=i))
+        self.assertIsNone(store.flag_peer_outlier("R-008", oem="FloorBot", model="FB-200", resource="water"))
+
+    def test_minutes_remaining_basic_math(self):
+        # 50% usable headroom at a rate of 25%/60min -> 120 active minutes left
+        self.assertAlmostEqual(minutes_remaining(current_pct=60.0, threshold_pct=10.0, rate_per_60min=25.0), 120.0)
+        self.assertIsNone(minutes_remaining(current_pct=60.0, threshold_pct=10.0, rate_per_60min=None))
+
+    def test_eta_present_in_monitor_snapshot(self):
+        fleet = facility.build_fleet()
+        monitor = Monitor(fleet)
+        telem = _telem(10, 80.0, 90.0, RobotStatus.CLEANING)
+        telem.robot_id = "R-001"
+        monitor.ingest(telem, fleet["R-001"])
+        snap = monitor.robots["R-001"]
+        self.assertIsNotNone(snap.eta_battery_min)
+        self.assertEqual(snap.eta_battery_source, "spec")
+
+    def test_offline_mission_telemetry_is_reconciled_not_lost(self):
+        """Regression: buffered telemetry from an offline-mission robot
+        (e.g. R-008/R-006 at Z8) used to be counted and logged but never
+        actually fed into Monitor -- meaning an offline robot could never
+        accumulate a consumption profile at all. Now it's ingested on
+        reconnect, in original chronological order."""
+        dispatcher, monitor, schedule = build_shift()
+        dispatcher.run_until(720)
+        offline_zone_robot = None
+        for rid, tasks in schedule.items():
+            if any(dispatcher.zones[a.zone_id].wifi is False for a in tasks):
+                offline_zone_robot = rid
+                break
+        self.assertIsNotNone(offline_zone_robot, "no robot assigned to the no-WiFi zone this schedule")
+        hist = monitor.history[offline_zone_robot]
+        active_samples = [t for t in hist if t.status == RobotStatus.OFFLINE_MISSION]
+        self.assertGreater(len(active_samples), 0,
+                           f"{offline_zone_robot}'s offline-mission telemetry was never reconciled into Monitor")
+
+
+def _seg(robot_id, oem, model, battery_rate=None, water_rate=None, shift=0):
+    from fleet_orchestrator.profile import TripSegment
+    return TripSegment(
+        robot_id=robot_id, oem=oem, model=model, shift_label=f"shift{shift}",
+        start_t=shift * 1000, end_t=shift * 1000 + 60, active_minutes=60.0,
+        battery_used_pct=battery_rate or 0.0, battery_rate_per_60min=battery_rate or 0.0,
+        water_used_pct=water_rate, water_rate_per_60min=water_rate,
+    )
+
+
+def statistics_mean(vals):
+    import statistics
+    return statistics.mean(vals)
 
 
 if __name__ == "__main__":

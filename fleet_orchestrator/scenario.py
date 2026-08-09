@@ -20,18 +20,19 @@ from .dispatcher import FleetDispatcher
 from .hal.registry import build_adapter
 from .models import fmt_time
 from .monitor import Monitor
+from .profile import render_profile_report
 from .scheduler import generate_schedule
 
 DAY = "Tue"
 
 
-def build_shift(seed: int = 42):
+def build_shift(seed: int = 42, profile_store=None):
     rng = random.Random(seed)
     zones = facility.build_zones()
     fleet = facility.build_fleet()
     schedule = generate_schedule(fleet, zones, DAY)
 
-    monitor = Monitor(fleet)
+    monitor = Monitor(fleet, profile_store=profile_store)
     for zid, zone in zones.items():
         if not zone.scheduled_today(DAY):
             monitor.mark_not_scheduled(zid, f"{zid} not scheduled on {DAY} (cleaning days: {zone.days})")
@@ -41,8 +42,8 @@ def build_shift(seed: int = 42):
     return dispatcher, monitor, schedule
 
 
-def run_tuesday_night(verbose: bool = True):
-    dispatcher, monitor, schedule = build_shift()
+def run_tuesday_night(verbose: bool = True, profile_store=None, shift_label: str = "Tue"):
+    dispatcher, monitor, schedule = build_shift(profile_store=profile_store)
     narrative = []
 
     def note(msg: str):
@@ -105,6 +106,10 @@ def run_tuesday_night(verbose: bool = True):
     note("7:00 AM -- shift ends")
     report = monitor.shift_report(dispatcher.controllers, dispatcher.zones)
     note(report)
+
+    if profile_store is not None:
+        profile_store.record_shift(monitor, dispatcher.fleet, shift_label=shift_label)
+        note("\n" + render_profile_report(profile_store, dispatcher.fleet))
 
     return dispatcher, monitor, "\n".join(narrative)
 
