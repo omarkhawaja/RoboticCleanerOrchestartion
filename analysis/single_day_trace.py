@@ -40,7 +40,7 @@ def main():
     print("  table (facility.py), converted from ft^2/hr to ft^2/min by /60 at")
     print("  the point of use (dispatcher.py: `self.spec.coverage_ft2_hr/60`).")
     print("  It's a constant linear rate -- no slowdown for turns, obstacles,")
-    print("  or overlap loss. See SPEC.md #12 for that simplification.\n")
+    print("  or overlap loss. See SPEC.md #13 for that simplification.\n")
     print(f"  {'Robot':<8}{'Model':<10}{'ft^2/hr':>10}{'ft^2/min':>11}{'sec/ft^2':>11}")
     for rid, spec in fleet.items():
         print(f"  {rid:<8}{spec.model:<10}{spec.coverage_ft2_hr:>10.0f}"

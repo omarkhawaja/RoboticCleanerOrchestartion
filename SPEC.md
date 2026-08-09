@@ -29,7 +29,52 @@ Risk-weighted-coverage-first, cost-second is the one that matches how a
 real facility would actually be judged (SLA breaches in sterile areas are
 categorically worse than an extra 10-minute water stop).
 
-## 2. Heuristic scheduler, not an ILP/CP-SAT solver
+## 2. Empirical validation: water, not battery, is the real binding constraint
+
+Section 1's objective function claims water stops are the secondary cost
+worth minimizing and battery isn't. That claim was checked, not assumed:
+`analysis/binding_constraint_study.py` runs 140 simulated shifts (all 7
+days of the week x 20 random seeds each, no injected disruptions, so the
+measurement isn't confounded by scripted failures) and records, every time
+a robot is forced to return to the dock, whether battery or water was the
+reason.
+
+**Result: 320 dock returns total across all 140 shifts. 320 were
+water-bound. Zero were battery-bound.** Every wet robot that ever needed a
+mid-shift break needed it for water, every single time.
+
+| OEM | water-bound stops | battery-bound stops |
+|---|---|---|
+| AutoScrub (R-001/002/003) | 280 | 0 |
+| FloorBot (R-006/008) | 40 | 0 |
+| CleanPath (dry, no tank) | n/a | 0 |
+
+This isn't a scheduling artifact -- it falls straight out of the OEM spec
+sheet numbers in the Fleet Roster table. Every wet robot in this fleet
+carries a **90-minute** water tank against a **180-240 minute** battery
+(a 2-2.7x ratio). Any continuous clean run longer than 90 minutes hits
+water first, unconditionally, regardless of scheduling quality -- there is
+no assignment strategy that changes this, because the hardware was never
+given enough water capacity to match its own battery life. A companion
+run, `analysis/single_day_trace.py` (one full Tuesday, no disruptions),
+shows the same pattern concretely: 3 total dock trips fleet-wide across
+the whole shift, and every one of them logs `binding constraint: water`.
+
+The same 140-shift run also found **0 partial and 0 missed zones** under
+routine operation -- every miss shown elsewhere in this system (Z5 in the
+Tuesday demo, the R-003 sterile zones) came from an *injected* disruption
+(a forced 25-minute escort override, a hard robot failure), never from
+ordinary battery/water/escort variance. That's a second data point for the
+objective function: this facility's windows have enough built-in slack
+that raw completion speed isn't the scarce resource in steady state --
+water stops and disruption resilience are.
+
+**Practical implication:** if this fleet were being re-speced rather than
+just re-scheduled, the single highest-leverage hardware change would be a
+bigger water tank on the AutoScrub/FloorBot units, not a bigger battery --
+battery is already sized well past what the schedule ever asks of it.
+
+## 3. Heuristic scheduler, not an ILP/CP-SAT solver
 
 8 robots x 8 zones is small enough that a real constraint solver (OR-Tools
 CP-SAT, e.g.) would find a provably-optimal assignment in milliseconds, and
@@ -44,7 +89,7 @@ soft preferences (minimize robot-hours, balance wear across the fleet).
   thinking over polish -- a heuristic I can fully explain in the 30-minute
   walkthrough is worth more here than a solver I'd have to hand-wave past.
 - The **Dispatcher is the actual source of truth for water/battery timing**
-  (see #3) -- the scheduler only needs to prove a plan is *plausible*, not
+  (see #4) -- the scheduler only needs to prove a plan is *plausible*, not
   compute exact break timing, which shrinks the problem a solver would need
   to solve anyway.
 - Tradeoff accepted: the heuristic can leave value on the table (e.g. it
@@ -52,7 +97,7 @@ soft preferences (minimize robot-hours, balance wear across the fleet).
   is a rounding error; it would not scale to hundreds of zones without a
   real solver.
 
-## 3. The scheduler plans; the Dispatcher decides when cycles actually happen
+## 4. The scheduler plans; the Dispatcher decides when cycles actually happen
 
 The scheduler produces a *plan* (who cleans what, roughly when, with a 20%
 time buffer for cycle overhead as a feasibility check). It **deliberately
@@ -72,7 +117,7 @@ buffer), so it will occasionally accept a zone that later needs a second,
 unplanned-for cycle and runs past its window -- that shows up honestly as
 `PARTIAL` in the shift report rather than being hidden.
 
-## 4. Shared per-zone progress pool for multi-robot zones
+## 5. Shared per-zone progress pool for multi-robot zones
 
 When two robots are assigned to the same zone (e.g. a large zone under
 time pressure), they draw down **one shared remaining-sqft counter**, not
@@ -88,7 +133,7 @@ that a solver would never introduce (it reasons about the whole assignment
 at once) but a greedy per-robot heuristic can, and is worth naming
 explicitly rather than papering over.
 
-## 5. FloorBot water uncertainty: conservative, not aggressive
+## 6. FloorBot water uncertainty: conservative, not aggressive
 
 FloorBot's coarse 4-bucket water reporting (`high/med/low/empty`) means a
 "low" reading covers a wide true range (roughly 8-33% of tank capacity,
@@ -110,7 +155,7 @@ confirm a leak. The assignment's own "What Will Impress Us" section calls
 this exact tradeoff out, so the choice and its cost are made explicit here
 rather than left implicit in a threshold constant.
 
-## 6. Scripted vs. emergent disruptions in the demo
+## 7. Scripted vs. emergent disruptions in the demo
 
 Two of the five required disruptions emerge **organically** from the
 simulated physics with zero scripting: R-001 running its water tank dry
@@ -139,7 +184,7 @@ instead fires the WS-drop during whichever CleanPath robot's actual
 cleaning window it falls in, which is the more honest way to exercise the
 same mechanism.
 
-## 7. R-001 vs. R-006 to the offline garage (Z8)
+## 8. R-001 vs. R-006 to the offline garage (Z8)
 
 The assignment brief is internally inconsistent here: Section 3's bullet
 list says *"R-001 is dispatched to Z8,"* but the detailed sample-timeline
@@ -151,7 +196,7 @@ specific and names the OEM), so this system's scheduler prefers hard-scrub
 capable robots for the concrete garage floor, which in practice assigns a
 FloorBot. This ambiguity is called out here rather than silently resolved.
 
-## 8. No LLM component
+## 9. No LLM component
 
 Per the assignment: *"If you use LLMs for any component, explain what they
 handle vs. deterministic code."* This system uses **no LLM anywhere** --
@@ -175,14 +220,14 @@ handling) is deterministic threshold/rule-based code. Reasons:
   of an otherwise-untouched decision layer, and the assignment says
   explicitly that production UI isn't part of what's being evaluated.
 
-## 9. ML for scheduling optimization
+## 10. ML for scheduling optimization
 
 Not used. The fleet/zone count (8 and 8) doesn't benefit from a learned
 model over a simple heuristic or solver, and there's no training data (a
 single simulated night) to learn from responsibly. The one place ML is
-explicitly designed for but not implemented is anomaly detection (see #10).
+explicitly designed for but not implemented is anomaly detection (see #11).
 
-## 10. Anomaly detection: threshold-based now, ML-shaped data model
+## 11. Anomaly detection: threshold-based now, ML-shaped data model
 
 Per the rubric: *"Threshold-based is fine, but design the telemetry data
 model so ML-based anomaly detection could be added later."* `Monitor`
@@ -194,7 +239,7 @@ drain-rate or leak classifier. The threshold checks in
 model call; swapping them out would not require touching the schema, only
 the function body.
 
-## 11. Persistence granularity: shift-boundary, not mid-tick
+## 12. Persistence granularity: shift-boundary, not mid-tick
 
 Per the rubric: *"State must persist across restarts."* This orchestrator
 is a nightly batch scheduler -- the realistic restart scenario is "the
@@ -215,7 +260,7 @@ Dispatcher) wasn't justified by the assignment's 6-8 hour scope for a
 failure mode (mid-shift process crash) that's a small fraction of the
 realistic restart cases.
 
-## 12. Robot simulator fidelity
+## 13. Robot simulator fidelity
 
 Travel between zones is modeled as a flat cost (5 min, 2% battery) per the
 spec, applied once at the start of a transition rather than drained
@@ -227,7 +272,7 @@ tank was). Security escort delay is modeled as `random.uniform(0, 10)`
 minutes for any zone entry after 23:00, seeded for reproducibility, with
 the Z5 disruption overriding it to a forced 25 minutes for that one event.
 
-## 13. What's intentionally not handled
+## 14. What's intentionally not handled
 
 Per the rubric's own "What We Don't Care About": no production UI (this is
 a CLI + JSON), no real OEM API integration (all three are simulated), and

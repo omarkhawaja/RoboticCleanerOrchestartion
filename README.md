@@ -143,8 +143,10 @@ Run `python main.py` for the full narrative and report.
 ## Design decisions & tradeoffs
 
 Kept out of this README on purpose -- see **[SPEC.md](SPEC.md)** for the
-full discussion of: the objective function, why the scheduler is a greedy
-heuristic instead of an ILP solver, the FloorBot water-uncertainty policy
-(conservative vs. aggressive), scripted vs. emergent disruptions, the
-persistence granularity tradeoff, why no LLM component was used, and every
-place the assignment brief was ambiguous and what assumption was made.
+full discussion of: the objective function and the 140-shift empirical
+study backing it (water binds 100% of the time, battery never does), why
+the scheduler is a greedy heuristic instead of an ILP solver, the FloorBot
+water-uncertainty policy (conservative vs. aggressive), scripted vs.
+emergent disruptions, the persistence granularity tradeoff, why no LLM
+component was used, and every place the assignment brief was ambiguous
+and what assumption was made.
