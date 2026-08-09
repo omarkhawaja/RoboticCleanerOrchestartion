@@ -9,7 +9,7 @@
 | Real-Time Adaptation | 20% | ✅ All 5 disruptions, detect→assess→decide→act→log, R-003 escalates with options (not silently dropped), R-005 WS drop tested both ways (reconnects / never reconnects) |
 | Physical-World Reasoning | 15% | ✅ Real (non-linear) battery/charging physics, transport-vs-scrubbing travel speed, full offline-mission handoff protocol, partial completion tracked honestly |
 | Fleet Observability | 10% | ✅ Shift report, SLA tracking, consumable tracking, OEM health, anomaly flagging -- extended with learned per-robot ETA and cross-shift degradation/peer-outlier detection |
-| Code & Communication | 10% | ✅ 40 automated tests, 6 empirical analysis scripts (not hand-waved claims), 2 architecture diagrams, a browser-based visual demo, 19-section SPEC.md documenting every decision *and* every bug found along the way |
+| Code & Communication | 10% | ✅ 47 automated tests, 6 empirical analysis scripts (not hand-waved claims), 2 architecture diagrams, a browser-based visual demo, 20-section SPEC.md documenting every decision *and* every bug found along the way |
 
 Detail for each dimension, with the specific code it's backed by:
 
@@ -80,13 +80,13 @@ validated against two genuinely distinct synthetic fault shapes (an aging
 drift and a chronic day-1 defect) with a control robot confirming neither
 false-positives (SPEC.md #14).
 
-**6. Code & Communication.** 40 automated tests
+**6. Code & Communication.** 47 automated tests
 (`tests/test_basic.py`), 6 analysis scripts producing real measured
 numbers instead of hand-waved claims (`analysis/*.py` -- binding
 constraint study, single-day trace, daily tolerance table, consumable
 profile demo, facility week report), a mermaid **and** an ASCII
 architecture diagram (below), a browser-based visual simulation
-(`visualizer/index.html`), and a 19-section `SPEC.md` documenting every
+(`visualizer/index.html`), and a 20-section `SPEC.md` documenting every
 design decision, every assumption, and every bug found and fixed along
 the way -- including the ones that were embarrassing to admit, like a
 sanitization cycle silently skipping the first zone of every shift.
@@ -101,22 +101,82 @@ simulation you can run today with no external services.
 
 For design decisions, assumptions, and tradeoffs, see **[SPEC.md](SPEC.md)**.
 
-## Quick start
+## Setup
+
+Requires **Python 3.10+**, nothing else — no `pip install`, no external
+services, no API keys. Clone and run:
+
+```bash
+git clone https://github.com/omarkhawaja/RoboticCleanerOrchestartion.git
+cd RoboticCleanerOrchestartion
+python main.py
+```
+
+## Running the simulation
 
 ```bash
 python main.py                          # run the Tuesday night shift, full narrative + shift report
 python main.py --quiet                   # only print the final shift report + dashboard
 python main.py --save data/shift.json    # also persist fleet/zone/consumable state to disk
 python main.py --load data/shift.json    # print a previously saved shift's state
-python -m unittest tests.test_basic -v   # run the test suite (15 tests)
+python main.py --profile-db data/profile.json   # accumulate a cross-shift consumable profile (re-run to build history)
 ```
 
-No dependencies beyond the Python 3.10+ standard library.
+## Testing / verifying the system against the spec
+
+```bash
+python -m unittest tests.test_basic -v   # full test suite (47 tests)
+python -m pytest tests/ -v               # same suite, if pytest is installed
+```
+
+The test suite is the actual verification harness — it checks the system
+against the assignment's given data and constraints directly, not just
+"does it run": `TestFacilitySpecMatchesImage` locks in every zone's
+sqft/floor/classification/window/day-pattern against the facility spec
+field by field; `TestScheduler`/`TestSanitization`/`TestDualConstraint`
+verify capability gating, the AS-900H sanitization cycle, and the
+battery/water dual-constraint; `TestReplanner` exercises all 5 disruption
+handlers, including both outcomes of the R-005 WebSocket-drop grace
+period; `TestChargingCurve`/`TestTransportModeTravel`/
+`TestFloorBotWaterEstimator`/`TestConsumableProfile` cover the physics and
+learned-profiling additions. No test touches the network or a real
+service — the whole suite runs in well under a second.
+
+To "deploy" this for a live walkthrough there's nothing to provision —
+it's a CLI. The closest thing to a deploy step is opening the standalone
+browser demo (next section), which is just a static HTML file.
+
+**Empirical/analysis scripts** (each runs many simulated shifts and
+prints real measured numbers, not hand-waved claims — see SPEC.md for
+what each one found):
+
+```bash
+python -m analysis.binding_constraint_study     # 140 shifts: is water or battery the real bottleneck?
+python -m analysis.single_day_trace             # one full shift, minute-by-minute event trace
+python -m analysis.daily_tolerance_table 28      # N consecutive days: schedule slack per day
+python -m analysis.facility_week_report          # Mon-Sun: the facility table + weekly summary (see below)
+python -m analysis.consumable_profile_demo       # 20 shifts, synthetic aging/chronic-fault injection
+```
 
 ## Visual demo (browser)
 
-`visualizer/index.html` is a standalone, self-contained 2D simulation you
-can just open in a browser (no server, no build step) — a schematic bird's
+**File:** [`visualizer/index.html`](visualizer/index.html) — after
+cloning, open it directly (`file://` works, no server needed):
+
+```bash
+# macOS
+open visualizer/index.html
+# Linux
+xdg-open visualizer/index.html
+# Windows
+start visualizer/index.html
+```
+
+GitHub's file viewer only shows the source, not a live page — it has to
+be opened locally, or served from GitHub Pages if you want a shareable
+link.
+
+A standalone, self-contained 2D simulation — a schematic bird's
 eye floor plan where zones paint from red to green as robots clean them,
 live battery/water bars per robot (including FloorBot's uncertain bucket
 reading), a real-time clock across the 19:00-07:00 shift, and two
