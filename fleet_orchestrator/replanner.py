@@ -53,13 +53,14 @@ def handle_robot_failure(dispatcher, monitor, robot_id: str, t: float, error_cod
             "(2) accept a documented SLA exception and defer to next shift pending a loaner/replacement AS-900H, "
             "(3) override with a non-certified scrubber under a signed compliance exception (NOT recommended -- "
             "sterile classification exists for infection control, this option is surfaced but not auto-selected). "
-            "System default: zones marked MISSED-ESCALATED, human alert raised immediately, "
+            "System default: zones marked MISSED_ESCALATED, human alert raised immediately, "
             "no non-certified robot is auto-dispatched into a sterile zone."
         )
         for zid in at_risk:
             prior = monitor.zones.get(zid)
             coverage = prior.coverage if prior else 0.0
-            monitor.on_zone_event(zid, ZoneStatus.MISSED, t, role="primary", robot_id=robot_id, coverage=coverage)
+            monitor.on_zone_event(zid, ZoneStatus.MISSED_ESCALATED, t, role="primary",
+                                  robot_id=robot_id, coverage=coverage)
 
     monitor.log_disruption(t, "ROBOT FAILURE",
                            f"{robot_id} ({spec.model}) reports {error_code} and goes offline", decision)

@@ -176,7 +176,8 @@ checks for another sterile-certified backup robot in the fleet and
 fails over automatically if one exists. When none does (R-003/AS-900H is
 the only sterile-certified unit in this fleet, so this is the actual
 demo path), it does not just log and move on — it marks the at-risk
-sterile zones `MISSED-ESCALATED` (distinct from a routine `MISSED`) and
+sterile zones `MISSED_ESCALATED` (a distinct `ZoneStatus`, not just a
+routine `MISSED`) and
 raises a decision presenting **three explicit options** to a human
 operator: dispatch a manual cleaning crew, accept a documented SLA
 exception and defer to next shift, or override with a non-certified
@@ -247,7 +248,7 @@ without changing that safety-relevant trigger (SPEC.md #9, #14).
 **3. Real-Time Adaptation.** All 5 disruptions are implemented in
 `replanner.py`, each following detect→assess→decide→act→log. R-003:
 escalates to a human with 3 explicit options since no sterile backup
-exists, marks zones `MISSED-ESCALATED` rather than silently dropping
+exists, marks zones `MISSED_ESCALATED` rather than silently dropping
 them. R-008: conservative response (pulled in immediately, doesn't wait
 for "empty"), backed by an automatic model-vs-bucket divergence detector
 independently validated to catch the same event the scripted trigger

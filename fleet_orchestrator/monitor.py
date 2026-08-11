@@ -256,7 +256,7 @@ class Monitor:
         lines.append("=" * 72)
 
         lines.append("\n-- Zone Outcomes --")
-        complete = partial = missed = not_sched = 0
+        complete = partial = missed = escalated = not_sched = 0
         for zid, zone in zones_all.items():
             rec = self.zones.get(zid)
             if rec is None:
@@ -268,13 +268,20 @@ class Monitor:
                 if rec.wet_scrub_secondary:
                     extra += f" [secondary wet-scrub: {rec.wet_scrub_secondary}]"
             sla_flag = " *** SLA ZONE ***" if zone.classification in SLA_CLASSES else ""
-            lines.append(f"  {zid} {zone.name:<22} {status.value:<14}{extra}{sla_flag}")
+            lines.append(f"  {zid} {zone.name:<22} {status.value:<17}{extra}{sla_flag}")
             if status == ZoneStatus.COMPLETE:
                 complete += 1
             elif status == ZoneStatus.PARTIAL:
                 partial += 1
             elif status == ZoneStatus.MISSED:
                 missed += 1
+            elif status == ZoneStatus.MISSED_ESCALATED:
+                # Counts as both a miss (coverage-wise) and an escalation
+                # (process-wise) -- distinct from a routine MISSED so a
+                # reader can tell "ran out of window" apart from "no backup
+                # existed, a human had to decide." See SPEC.md #23.
+                missed += 1
+                escalated += 1
             else:
                 not_sched += 1
         total_active = complete + partial + missed
@@ -282,7 +289,8 @@ class Monitor:
                          and self.zones.get(z.zone_id, ZoneRecord(z.zone_id)).status != ZoneStatus.NOT_SCHEDULED)
         sla_met = sum(1 for z in zones_all.values() if z.classification in SLA_CLASSES
                       and self.zones.get(z.zone_id, ZoneRecord(z.zone_id)).status == ZoneStatus.COMPLETE)
-        lines.append(f"\n  Totals: {complete} complete, {partial} partial, {missed} missed, "
+        lines.append(f"\n  Totals: {complete} complete, {partial} partial, {missed} missed"
+                     f"{f' ({escalated} escalated to human)' if escalated else ''}, "
                      f"{not_sched} not scheduled today")
         lines.append(f"  SLA zones (Sterile/High-traffic): {sla_met}/{sla_total} fully completed")
 

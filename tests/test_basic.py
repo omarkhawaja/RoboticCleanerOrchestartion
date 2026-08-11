@@ -20,7 +20,7 @@ from fleet_orchestrator.hal.base import (
 )
 from fleet_orchestrator.hal.floorbot import bucket_pct_bounds, bucket_to_minutes_range, pct_to_bucket
 from fleet_orchestrator.hal.registry import build_adapter
-from fleet_orchestrator.models import OEM, RobotStatus, Telemetry
+from fleet_orchestrator.models import OEM, RobotStatus, Telemetry, ZoneStatus
 from fleet_orchestrator.monitor import Monitor
 from fleet_orchestrator.profile import ProfileStore, extract_trip_segments, minutes_remaining
 from fleet_orchestrator.scenario import build_shift
@@ -427,6 +427,27 @@ class TestReplanner(unittest.TestCase):
         decision = replanner.handle_robot_failure(dispatcher, monitor, "R-003", t=100)
         self.assertIn("NO other sterile-certified robot", decision)
         self.assertTrue(dispatcher.controller("R-003").disabled)
+
+    def test_robot_failure_marks_zones_missed_escalated_not_bare_missed(self):
+        """Regression: the decision text always claimed escalated zones were
+        marked distinctly ("MISSED_ESCALATED"), but the code used to record
+        plain ZoneStatus.MISSED -- indistinguishable in the shift report from
+        a zone that simply ran out of window time. Escalated misses must use
+        the dedicated status."""
+        fleet = facility.build_fleet()
+        zones = facility.build_zones()
+        schedule = generate_schedule(fleet, zones, "Tue")
+        monitor = Monitor(fleet)
+        adapters = {rid: build_adapter(spec) for rid, spec in fleet.items()}
+        rng = random.Random(1)
+        dispatcher = FleetDispatcher(fleet, adapters, schedule, zones, monitor, replanner, rng)
+        replanner.handle_robot_failure(dispatcher, monitor, "R-003", t=100)
+        sterile_zone_ids = [zid for zid, z in zones.items() if z.classification == "Sterile"]
+        at_risk = [zid for zid in sterile_zone_ids if monitor.zones.get(zid) is not None]
+        self.assertTrue(at_risk, "expected at least one sterile zone marked at-risk")
+        for zid in at_risk:
+            self.assertEqual(monitor.zones[zid].status, ZoneStatus.MISSED_ESCALATED)
+            self.assertNotEqual(monitor.zones[zid].status, ZoneStatus.MISSED)
 
     def test_ws_drop_reconnects_within_grace_period(self):
         fleet = facility.build_fleet()

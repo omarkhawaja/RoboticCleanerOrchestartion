@@ -163,3 +163,74 @@ simulated), not every edge case. Notably:
 - Freight-elevator transit time (+3 min between floors) isn't modeled
   separately from flat travel cost — would require tracking which zones
   share a floor.
+
+## 21. Battery return threshold: a tracked trip-cost estimate, not a flat constant
+The battery return-to-dock trigger is not a fixed percentage. `wants_return_now()`
+(`dispatcher.py`) compares live battery against
+`battery_used_since_dock + BATTERY_RETURN_PCT` — a 10% safety floor plus a
+2% headroom cushion, *plus* a running estimate of what the trip back would
+actually cost. That estimate (`RobotController.battery_used_since_dock`) is
+measured, not assumed: it accumulates `TRAVEL_BATTERY_PCT` on every travel
+leg the robot takes since its last real dock-service stop, and resets to 0
+on arrival at the dock. **Assumption:** a robot that has hopped between
+several zones without returning to the dock needs roughly as much battery
+to get back as it has spent getting that far out — a standard "distance
+traveled ≈ distance to return" heuristic used when there's no real
+facility path graph to compute an exact route cost from. In this
+simulator's flat per-transition travel-cost model, the *actual* trip home
+is always a single fixed-cost hop (`TRAVEL_BATTERY_PCT`, same as any other
+transition — see #17), so this tracked estimate is deliberately more
+conservative than what the physics alone requires for the common
+single-hop case; it only earns its keep once a robot has made multiple
+hops away from the dock in a row, where a flat constant would otherwise
+under-reserve. Verified against the existing 140-shift study: no change
+to the water-vs-battery split (#2, still 100% water-bound) or fleet-wide
+schedule slack, since normal shifts rarely chain enough zone-to-zone hops
+to make the estimate diverge meaningfully from the old flat 12%.
+
+## 22. Precise-sensor water return floor: 1.5%, not 4% — and not 0%
+`WATER_RETURN_PCT` (`dispatcher.py`) is the return trigger for robots with
+a precise water sensor (AutoScrub). The first implementation copied the
+same margin pattern as the battery floor and set this to 4.0%, but that
+copy doesn't hold up: battery's floor needs a reserve for the trip back to
+the dock (see #21) because battery keeps draining while EN_ROUTE; water
+does not drain in transit at all (`PhysicalState.advance` only drains
+water during `CLEANING`/`OFFLINE_MISSION`, never `EN_ROUTE`), so there is
+no equivalent "reserve enough to make it home" need. **The only real
+constraint is the simulator's 1-minute tick resolution** — `wants_return_now()`
+is evaluated once per simulated minute, right after that minute's drain,
+so the floor has to be at least one tick's worth of drain, or a robot
+could be told to keep cleaning through a tick that would empty the tank
+partway through it. All wet robots share a 1.5-hour tank (~1.11%/min
+drain), so **1.5%** was chosen as roughly one tick of margin above zero
+plus a small cushion for floating-point rounding — enough to guarantee
+the tank is never asked to run a full tick on fumes, without holding back
+meaningfully more than that. At the old 4.0% floor, robots were forfeiting
+~3.6 minutes of legitimately usable cleaning time on every water-bound
+stop for no corresponding safety benefit — measured against
+`analysis/binding_constraint_study.py`'s 320 water-bound stops across 140
+shifts, that's real reclaimed cleaning time, not a rounding error. FloorBot's
+own return trigger is unaffected by this — it's still bucket-based (`#8`),
+since its coarse sensor has no precise percentage to apply a tick-based
+floor to in the first place.
+
+## 23. Bug: escalated sterile-zone misses weren't actually distinguishable from routine misses
+`replanner.handle_robot_failure()`'s decision text always claimed *"zones
+marked MISSED_ESCALATED"* when R-003 fails with no sterile-certified
+backup available — but the code underneath recorded plain
+`ZoneStatus.MISSED`, the same status a zone gets for simply running out of
+window time. `ZoneStatus` had no `MISSED_ESCALATED` value at all, so the
+claim in the log text was aspirational, not real: a reader of the Zone
+Outcomes table couldn't tell "no backup existed, a human had to decide"
+apart from an ordinary miss without separately reading the disruption log.
+
+**Fix:** added `ZoneStatus.MISSED_ESCALATED` (`models.py`) and switched
+`handle_robot_failure`'s escalation branch to record it instead of plain
+`MISSED`. `Monitor.shift_report()` counts it toward the same `missed`
+total (it's still a coverage miss) but also tracks and surfaces a separate
+`escalated` count — e.g. `2 missed (2 escalated to human)` — so the
+distinction is visible in the summary line, not just buried in the
+per-zone table or the disruption log. Regression test:
+`tests/test_basic.py::test_robot_failure_marks_zones_missed_escalated_not_bare_missed`,
+which explicitly asserts the at-risk sterile zones get the escalated
+status and NOT plain `MISSED`.

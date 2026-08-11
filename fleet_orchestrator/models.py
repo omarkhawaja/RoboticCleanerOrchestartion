@@ -46,6 +46,7 @@ class ZoneStatus(str, Enum):
     COMPLETE = "COMPLETE"
     PARTIAL = "PARTIAL"
     MISSED = "MISSED"
+    MISSED_ESCALATED = "MISSED_ESCALATED"  # missed AND escalated to a human (e.g. no sterile backup)
     NOT_SCHEDULED = "NOT_SCHEDULED"  # e.g. Z4 on a Tuesday
 
 

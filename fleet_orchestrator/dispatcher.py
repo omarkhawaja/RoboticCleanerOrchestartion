@@ -29,7 +29,23 @@ from .hal.base import (
 from .models import RobotSpec, RobotStatus, Telemetry, Zone, ZoneStatus, fmt_time
 from .scheduler import Assignment
 
-BATTERY_RETURN_PCT = 12.0     # leave 2% headroom for the trip back over the 10% safety line
+BATTERY_RETURN_PCT = 12.0     # 10% safety floor + 2% headroom, ADDED to the tracked trip-cost
+                               # estimate below -- see RobotController.battery_used_since_dock
+# Precise-sensor (AutoScrub) water return floor. Water does NOT drain during
+# the EN_ROUTE trip back to the dock (see PhysicalState.advance -- travel is
+# a flat one-time debit, not a per-minute rate, and it's battery-only), so
+# there's no "reserve enough to make the trip" need the way there is for
+# battery. The only real constraint is this system's 1-minute tick
+# resolution: `wants_return_now()` is checked once per simulated minute,
+# right after that minute's drain, so the floor must be at least one tick's
+# worth of drain or a robot could be asked to clean through a tick that
+# empties the tank mid-pass. All wet robots share a 1.5h tank -> ~1.11%/min
+# drain, so 1.5% is ~1 tick of margin above zero plus a small safety
+# cushion for floating-point rounding -- deliberately NOT the old 4.0%,
+# which forfeited ~3.6 min of usable cleaning time per water-bound stop
+# (out of ~320 stops/140 shifts measured in analysis/binding_constraint_
+# study.py) for no corresponding safety benefit. See SPEC.md #22.
+WATER_RETURN_PCT = 1.5
 ESCORT_ZONE_HOUR_START = 240  # 11:00 PM in shift-minutes -> escort required after this
 
 
@@ -66,6 +82,16 @@ class RobotController:
         self.resume_zone: Optional[str] = None  # zone to travel back to after a dock stop
         self.pending_binding_reason: Optional[str] = None
 
+        # Running estimate of "how much battery it would cost to get back to
+        # the dock right now" -- tracked as the battery actually spent on
+        # travel legs since the robot last left a real dock-service stop,
+        # not a hardcoded flat constant. Reset to 0 on arrival at the dock
+        # (_arrive_at_dock), accumulated by TRAVEL_BATTERY_PCT on every
+        # travel leg since (_begin_travel). See wants_return_now() and
+        # SPEC.md "Battery return threshold" for the assumption this
+        # encodes.
+        self.battery_used_since_dock: float = 0.0
+
         self.disabled = False
         self.escort_override: Dict[str, float] = {}
         self.offline_active = False
@@ -94,19 +120,37 @@ class RobotController:
 
     def wants_return_now(self, telem: Telemetry, zone: Zone) -> Optional[str]:
         """Returns 'battery' or 'water' if the robot must head to the dock
-        now, else None. Water-uncertainty policy: for FloorBot's coarse
-        bucket reporting we act on the *conservative* edge (trigger as soon
-        as the bucket reads 'low', not 'empty') rather than the midpoint
-        estimate -- see SPEC.md 'FloorBot water uncertainty' for the
-        aggressive-vs-conservative tradeoff."""
-        if telem.battery_pct <= BATTERY_RETURN_PCT:
+        now, else None.
+
+        Battery policy: the trigger is NOT a flat percentage. It's "however
+        much battery it would cost to get back to the dock from here, plus
+        a 10% safety floor plus a 2% headroom cushion" --
+        `self.battery_used_since_dock + BATTERY_RETURN_PCT`. The trip-cost
+        term is measured, not assumed: it's the battery actually spent on
+        travel legs since the robot's last real dock-service stop (see
+        `_begin_travel` / `_arrive_at_dock`), so a robot that has hopped
+        zone-to-zone several times without a dock visit correctly reserves
+        more margin than one that just left the dock for its first zone of
+        the run. Checked every simulated minute (this system's tick
+        resolution), same cadence as every other telemetry check.
+
+        Water-uncertainty policy: for FloorBot's coarse bucket reporting we
+        act on the *conservative* edge (trigger as soon as the bucket reads
+        'low', not 'empty') rather than the midpoint estimate -- see
+        SPEC.md 'FloorBot water uncertainty' for the aggressive-vs-
+        conservative tradeoff. For AutoScrub's precise sensor, the floor is
+        `WATER_RETURN_PCT` (1.5%) -- just above one tick's worth of drain,
+        unlike the battery floor there's no travel-back reserve needed
+        (water doesn't drain in transit), see WATER_RETURN_PCT's own
+        comment and SPEC.md #22."""
+        if telem.battery_pct <= self.battery_used_since_dock + BATTERY_RETURN_PCT:
             return "battery"
         if telem.water_pct is not None:
             if telem.water_uncertain:
                 bucket = telem.meta.get("water_bucket")
                 if bucket in ("low", "empty"):
                     return "water"
-            elif telem.water_pct <= 4.0:
+            elif telem.water_pct <= WATER_RETURN_PCT:
                 return "water"
         return None
 
@@ -197,6 +241,10 @@ class RobotController:
         self.adapter.phys.position = "IN_TRANSIT"
         self.adapter.set_internal_status(RobotStatus.EN_ROUTE)
         self.adapter.phys.battery_pct = max(0.0, self.adapter.phys.battery_pct - TRAVEL_BATTERY_PCT)
+        # This leg moves the robot further from the dock (or is the first
+        # leg out after one) -- accrue it into the return-trip cost estimate
+        # used by wants_return_now(). See battery_used_since_dock docstring.
+        self.battery_used_since_dock += TRAVEL_BATTERY_PCT
         self.phase, self.phase_timer = "TRAVEL", (TRAVEL_MINUTES_DOCK if fast else TRAVEL_MINUTES)
         self.travel_destination = "ZONE"
         self.stats["travel_events"] += 1
@@ -273,6 +321,9 @@ class RobotController:
 
     def _arrive_at_dock(self, t: float, on_zone_event: Callable):
         self.adapter.phys.position = DOCK
+        # Physically back at the dock -- the next leg out starts a fresh
+        # "distance from home" count for the battery-return estimate.
+        self.battery_used_since_dock = 0.0
         battery = self.adapter.phys.battery_pct
         water = self.adapter.phys.water_pct
         # Redeploy at CHARGE_DISPATCH_TARGET_PCT (90%), not 100%: charging
@@ -309,7 +360,7 @@ class RobotController:
         expected_min = (zone.sqft / self.spec.coverage_ft2_hr) * 60.0
         self.offline_return_t = t + expected_min
         msg = (f"OFFLINE MISSION handoff at {zone.zone_id}: preloaded waypoints + coverage "
-               f"plan for {zone.sqft} ft^2, abort thresholds battery<={BATTERY_RETURN_PCT}% / "
+               f"plan for {zone.sqft} ft^2, abort thresholds battery<=~{BATTERY_RETURN_PCT:.0f}%+trip-cost margin / "
                f"water<=low, expected return ~{fmt_time(int(self.offline_return_t))}")
         self._log(t, msg)
         if self.monitor:
