@@ -119,6 +119,85 @@ For the full reasoning behind each of these choices — including the
 alternatives considered and what they would have cost — see
 **[SPEC.md](SPEC.md)**.
 
+### Checking this against the case study's specific requirements
+
+Five things are commonly called out as what separates a real solution
+from a superficial one here. Checked directly against the code, not just
+asserted:
+
+**"Dual-constraint scheduling that treats water as a first-class resource
+alongside battery — not an afterthought."** ✅ True. Every simulated
+minute, `Dispatcher.wants_return_now()` (`dispatcher.py`) checks *both*
+battery and water and returns which one actually forced the stop — the
+two are checked in the same function, not battery-first-with-water-bolted-on.
+Each robot's shift stats separately count `water_bound_stops` vs.
+`battery_bound_stops`, and the shift report surfaces a `binding_constraint`
+per robot. This isn't just architecturally dual-constraint — it was
+empirically tested: `analysis/binding_constraint_study.py` runs 140
+simulated shifts and finds water is the actual binding constraint 100% of
+the time in this fleet (every wet robot's tank is undersized relative to
+its battery), which is *why* the scheduler's objective function treats
+water stops as the cost worth optimizing around. See SPEC.md #1–#2.
+
+**"Handling FloorBot's imprecise 'low' reading — conservative vs.
+aggressive, show your reasoning."** ✅ Handled, and deliberately
+conservative. FloorBot only reports a 4-bucket estimate (`high/med/low/empty`),
+where "low" covers a wide true range (~8–33% of tank capacity). Two
+policies were possible: trust the estimate and clean until "empty"
+(more cleaning time per cycle, but risks running the tank dry mid-zone —
+an actual equipment-damage risk, not just a missed deadline), or treat
+"low" itself as the trigger to return (costs a little cleaning time, buys
+certainty against ever running dry). **This system takes the conservative
+branch** — `wants_return_now()` triggers on `bucket in ("low", "empty")`,
+never waiting for "empty" to confirm. It's also *sharpened*, not just
+left coarse: `hal/floorbot.py` fuses the bucket with a continuous
+usage-time model (how long the robot has actively been cleaning since its
+last refill), but clamps that model to the range the real bucket still
+supports, so the smarter estimate can never override the conservative
+trigger — the fused number improves the dashboard/ETA/anomaly-detection
+reads, not the safety-relevant return decision. See SPEC.md #8–#9.
+
+**"A clean HAL where swapping in a new OEM is an adapter swap, and the
+scheduler never knows the difference."** ✅ True. `scheduler.py`,
+`dispatcher.py`, and `monitor.py` never import `autoscrub.py`,
+`cleanpath.py`, or `floorbot.py` — only `hal/registry.py` does, via a
+5-command interface (`start_mission`, `pause`, `resume`, `return_to_dock`,
+`status_query`) and one normalized `Telemetry` schema every adapter must
+fill in. Adding a 4th OEM is one new adapter file + one registry line +
+one fleet-roster entry — nothing in scheduling/dispatch logic changes,
+and `tests/test_basic.py::test_fourth_oem_is_a_pure_addition` enforces
+this by asserting against the registry's key set specifically so a future
+change can't quietly reintroduce an `if oem == "X"` branch upstream of the
+HAL. A ready copy-paste stub lives at `hal/_template_adapter.py`.
+
+**"Graceful degradation on R-003 failure — escalation with options, not
+just a log entry."** ✅ True. `replanner.handle_robot_failure()` first
+checks for another sterile-certified backup robot in the fleet and
+fails over automatically if one exists. When none does (R-003/AS-900H is
+the only sterile-certified unit in this fleet, so this is the actual
+demo path), it does not just log and move on — it marks the at-risk
+sterile zones `MISSED-ESCALATED` (distinct from a routine `MISSED`) and
+raises a decision presenting **three explicit options** to a human
+operator: dispatch a manual cleaning crew, accept a documented SLA
+exception and defer to next shift, or override with a non-certified
+scrubber under a signed compliance exception (explicitly surfaced but
+*not* auto-selected, since sterile classification is an infection-control
+requirement, not a preference). No non-certified robot is ever
+auto-dispatched into a sterile zone.
+
+**"Shift report tracking consumables — water cycles, water anomalies,
+binding constraint per robot."** ✅ True. `Monitor.shift_report()`
+(`monitor.py`) includes a dedicated "Consumable Tracking" section listing,
+per robot: `water_cycles`, `charge_cycles`, and `binding_constraint`
+(water/battery/n/a, from the same dual-constraint stats above); a
+separate "Anomalies Flagged" section lists every detected water anomaly
+(leak-suspected, inconsistent-reading, and the FloorBot usage-time-vs-bucket
+divergence check) with a confidence level and detail; and a "Disruptions &
+Adaptations" section logs every replanner decision, including water-anomaly
+responses. Anomaly detection is threshold-based today but built on a
+flat, normalized telemetry history specifically so it could be swapped for
+a learned model later without touching the data model (SPEC.md #15).
+
 ## Rubric self-assessment
 
 | Dimension | Weight | Verdict |
