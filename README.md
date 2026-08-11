@@ -1,5 +1,124 @@
 # Multi-OEM Fleet Orchestration System
 
+## How this system approaches the problem
+
+**The core idea: separate "what should happen" from "what is actually
+happening."** A night shift has two very different problems bundled
+together — planning who cleans what, and reacting to a physical robot
+running low on water at 11:47 PM. Trying to solve both with one component
+(a single upfront schedule that also predicts every break down to the
+minute) means the plan goes stale the moment anything real-world happens —
+an escort delay, a dropped connection, a sensor glitch. So this system
+splits into two halves that hand off to each other:
+
+- A **Scheduler** that, once at 7:00 PM, looks at the zone list and the
+  fleet and produces a rough plan: who cleans what, roughly when, checked
+  for basic feasibility (does this robot fit its window with some margin
+  to spare). It does *not* try to predict the exact minute a robot will
+  need a water break — that's unknowable in advance.
+- A **Dispatcher** that then runs the shift minute-by-minute against real
+  simulated physics (battery drain, water drain, travel, charging) and
+  inserts a break exactly when the robot's own telemetry says it needs
+  one. This is what actually enforces the dual battery+water constraint,
+  in real time, rather than the schedule guessing at it upfront.
+
+This plan/execute split is the single biggest design decision in the
+system, and it's why the rest holds up under disruption: a scripted event
+(a WebSocket drop, a sensor fault, an ad-hoc request from the facility
+manager) only ever has to update *live state*, never invalidate a
+precomputed timeline.
+
+**Scheduling and routing approach.** Zones aren't treated as equally
+important — a missed sterile OR corridor is categorically worse than a
+missed supply closet, so the scheduler ranks Sterile > High-traffic >
+Standard, then by earliest window close, and only adds a second robot to
+a zone when one robot would leave under 20% slack against its deadline
+(real risk of not finishing, not just "could go faster"). This is a
+**greedy, priority-ordered heuristic**, not a constraint solver (ILP/CP-SAT).
+For 8 robots × 8 zones a real solver would find a provably optimal
+assignment in milliseconds, and in a production system that's arguably the
+right call — but the heuristic is a ~40-line function anyone can read
+top-to-bottom and reason about by hand, and since the Dispatcher (not the
+Scheduler) is the actual source of truth for break timing, the scheduler
+only needs to prove a plan is *plausible*, which shrinks the problem
+considerably. The tradeoff: a heuristic can leave value on the table (a
+better swap two zones over that it never considers) — a rounding error at
+this scale, but it would not hold up at hundreds of zones without a real
+solver.
+
+**How the dual constraint (battery + water) is actually handled.** Every
+simulated minute, the Dispatcher checks both battery and water level and
+records *which one* would force a return to dock first. Measured directly
+across 140 simulated shifts (see `analysis/binding_constraint_study.py`):
+water is the binding constraint 100% of the time in this fleet — every
+wet robot's water tank is undersized relative to its battery (a 90-minute
+tank against a 180-240 minute battery), so no scheduling strategy changes
+that ratio. That empirical finding is *why* the objective function treats
+water stops as the real secondary cost to optimize around, instead of
+battery.
+
+**How disruptions and adaptation work.** A separate **Replanner** module
+handles the five required disruption types, each following the same
+loop: detect → assess → decide → act → log. Some disruptions emerge
+organically from the physics simulation itself (a robot's tank running dry
+mid-clean); others (a sensor fault, a dropped connection, a security
+escort delay, an ad-hoc cleaning request) are injected the way a real
+system would receive them — an external event hitting a live orchestrator
+— and are handled by generic handler functions that take a robot/zone/time,
+not anything demo-specific.
+
+**What changes when adding a new OEM adapter.** Every robot, regardless of
+vendor, is only ever touched through five commands (`start_mission`,
+`pause`, `resume`, `return_to_dock`, `status_query`) and reports back one
+common `Telemetry` shape — the Hardware Abstraction Layer (HAL). All
+OEM-specific quirks (a noisy GPS reading, a flaky WebSocket connection, a
+coarse 4-bucket water sensor) are handled entirely inside that OEM's own
+adapter file and never leak into the scheduler, dispatcher, or monitor.
+Concretely, adding a 4th OEM means: **(1)** add its name to the OEM enum,
+**(2)** write one new adapter file (a copy-paste template is provided)
+that translates that OEM's real behavior into the common Telemetry shape,
+**(3)** add one line to the adapter registry, **(4)** add its robots to the
+fleet roster. Nothing in the scheduling, dispatch, or monitoring logic
+should need to change — a dedicated test enforces this by checking the
+registry rather than the scheduler's internals, so a future change can't
+quietly reintroduce OEM-specific branching upstream of the HAL.
+
+**Step by step, in plain terms, what actually happens during a shift:**
+
+1. **7:00 PM — Plan.** The Scheduler looks at tonight's zone list (skipping
+   zones not scheduled today, like Admin Wing on a Tuesday) and the fleet,
+   and assigns each eligible robot to zones in priority order, producing a
+   rough timeline for the night.
+2. **Robots start moving.** The Dispatcher sends each robot its first
+   assignment. A robot travels to its zone, then switches into cleaning
+   mode, and its battery/water levels start draining according to real
+   physics for that robot's OEM and model.
+3. **Breaks happen organically.** As a robot's water or battery gets low,
+   the Dispatcher — not a precomputed plan — decides it's time to return to
+   the dock, refill water and/or charge (which happen concurrently), and
+   redeploy once it's ready (at 90% charge, not a full 100%, since the
+   last 10% of a real battery charge is disproportionately slow).
+4. **Something unexpected happens.** Whether it's a sensor going haywire, a
+   connection dropping, a security escort running late, or the facility
+   manager calling in an urgent ad-hoc cleaning request — the Replanner
+   detects it, assesses the impact on the current plan, decides on a
+   response (reroute, wait, escalate to a human, or accept partial
+   coverage), acts on it through the Dispatcher, and logs what happened
+   and why.
+5. **The Monitor watches throughout.** Every telemetry update is ingested
+   continuously — building live dashboards, flagging anomalies (like a
+   water reading that doesn't match how long the robot's actually been
+   cleaning), and tracking per-zone and per-robot status the whole night.
+6. **7:00 AM — Report.** The shift ends, and the Monitor produces a report:
+   which zones were fully cleaned, partially cleaned, or missed; how many
+   water/charge cycles each robot needed; which constraint bound each
+   robot's breaks; and any anomalies or escalations from the night. That
+   state can optionally be saved to disk so it survives a restart.
+
+For the full reasoning behind each of these choices — including the
+alternatives considered and what they would have cost — see
+**[SPEC.md](SPEC.md)**.
+
 ## Rubric self-assessment
 
 | Dimension | Weight | Verdict |
@@ -216,6 +335,92 @@ Z5 security escort delay. Two of those (R-001's water-empty stop on Z1,
 and R-008's routine charge/water cycles at the garage) emerge **organically**
 from the physics; the rest are injected at a scripted sim-time the way a
 live event feed would deliver them. See `fleet_orchestrator/scenario.py`.
+
+## Where things live, and what to touch when
+
+The short version: **`facility.py` is the assignment's data, `hal/base.py`
+is the physics, `scenario.py` is the demo script, everything else is
+orchestration logic you shouldn't need to touch for a routine change.**
+
+### "I need to add a new OEM / robot adapter"
+
+1. Add the OEM name to `models.OEM` (one enum line).
+2. Copy [`hal/_template_adapter.py`](fleet_orchestrator/hal/_template_adapter.py)
+   to `hal/<oem_name>.py`, rename the class, fill in `status_query()` (and
+   `tick()` only if this OEM has a per-minute quirk like a dropout timer).
+3. Register it in [`hal/registry.py`](fleet_orchestrator/hal/registry.py)'s
+   `_ADAPTERS` dict (one line).
+4. Add a `RobotSpec` for it to `facility.build_fleet()` in `facility.py`.
+
+Nothing in `scheduler.py`, `dispatcher.py`, or `monitor.py` should need to
+change — if it does, the adapter is leaking OEM-specific detail past the
+HAL boundary. `tests/test_basic.py::test_fourth_oem_is_a_pure_addition`
+enforces this.
+
+### "I need to add/change facility requirements" (zones, windows, fleet size)
+
+Edit **`facility.py`** only:
+- New/changed zone (sqft, floor type, classification, window, days,
+  WiFi) → `build_zones()`.
+- New/changed robot (OEM, model, coverage rate, battery/water hours,
+  capabilities) → `build_fleet()`.
+- New eligibility rule (e.g. a new floor type or classification) →
+  `can_clean()` / `wants_wet_scrub()` in the same file.
+
+This is the **only** file that hardcodes the assignment's numbers —
+everything downstream (scheduler, dispatcher, monitor) is generic over
+whatever zone/robot list it's handed, so a facility change here doesn't
+require touching orchestration logic.
+
+### "I need to add/change a physical constraint" (timing, charging, travel cost)
+
+Edit **`hal/base.py`** — it's the single shared "ground truth physics"
+engine every OEM adapter wraps (`PhysicalState`, plus module-level
+constants: `TRAVEL_MINUTES`, `WATER_CYCLE_MINUTES`, `SANITIZE_MINUTES`,
+the CC/CV charging curve). Dispatch-*policy* thresholds that react to that
+physics (when a robot is forced back to dock, when escort is required)
+live in **`dispatcher.py`** instead (`BATTERY_RETURN_PCT`,
+`ESCORT_ZONE_HOUR_START`) — physics vs. policy is the dividing line
+between these two files.
+
+### Files you'll rarely (or never) need to touch
+
+- **`models.py`** — the shared schema (`Telemetry`, `Zone`, `RobotSpec`,
+  enums). Touching it affects every downstream file, so change it only
+  for a genuinely new cross-cutting field/status, not a one-off need.
+- **`hal/_template_adapter.py`** — intentionally not imported by
+  anything; it's a copy-paste stub, never a place to add real behavior.
+- **`scenario.py`** — the *specific* scripted Tuesday-night demo
+  (timing of each disruption for the sample walkthrough). Edit this only
+  if you want a different demo narrative or day, not for facility/physics
+  changes — those belong in `facility.py` / `hal/base.py` respectively.
+- **`data/*.json`** — generated output from `--save`/`--profile-db` runs,
+  gitignored. Never hand-edit; regenerate by re-running `main.py`.
+- **`tests/test_basic.py`** — update when you *intentionally* change
+  behavior it covers (e.g. a new facility number); never edit a test just
+  to make a real regression pass.
+
+### Full module reference
+
+| Module | Stores / does | Edit when |
+|---|---|---|
+| `models.py` | Common schema: `Telemetry`, `Zone`, `RobotSpec`, enums | Adding a cross-cutting field/status every layer needs |
+| `facility.py` | Zones, fleet roster, capability rules | Facility or fleet requirements change |
+| `hal/base.py` | 5-command adapter interface + shared physics (`PhysicalState`) + physical constants | Adding/changing a physical constraint |
+| `hal/autoscrub.py`, `cleanpath.py`, `floorbot.py` | One OEM-specific quirk each (GPS drift, WS reconnect, water-bucket fusion) — nothing else | Modeling a new OEM-specific reporting quirk |
+| `hal/registry.py` | OEM enum → adapter class map | Registering a new OEM adapter |
+| `hal/_template_adapter.py` | Copy-paste stub, not wired in | Never edit directly — copy it |
+| `scheduler.py` | Greedy heuristic that builds the nightly plan | Changing the objective function / prioritization |
+| `dispatcher.py` | Per-minute FSM that executes the plan; dispatch-policy thresholds | Changing dispatch policy (return-to-dock floor, escort hour) or FSM behavior |
+| `monitor.py` | Telemetry ingestion, dashboards, anomaly detection, shift report | Adding observability or changing anomaly thresholds |
+| `profile.py` | Cross-shift learned consumption rates, degradation/peer-outlier detection | Changing how learned rates are computed/persisted |
+| `replanner.py` | The 5 disruption handlers | Adding/changing a disruption type |
+| `persistence.py` | JSON save/load of shift state | Changing what's persisted or the storage format |
+| `scenario.py` | The scripted Tuesday-night demo timeline | Changing the demo narrative/day, not facility/physics data |
+| `main.py` | CLI entrypoint | Adding a CLI flag |
+| `analysis/*.py` | Standalone measurement scripts (not imported by the app) | Adding a new empirical study |
+| `tests/test_basic.py` | Regression tests | Behavior intentionally changes |
+| `SPEC.md` | Rationale for every deliberate design decision | A new decision worth documenting is made |
 
 ## Architecture
 
