@@ -1,5 +1,7 @@
 # Multi-OEM Fleet Orchestration System
 
+![Architecture overview: 12-panel walkthrough of one simulated night shift, from facility/fleet setup through schedule generation, HAL adapter dispatch, the travel/cleaning FSM, the dual battery+water constraint check, dock service, telemetry/anomaly detection, disruption replanning, consumable profiling, the shift report, scenario/CLI orchestration, and the test/analysis suite — with legends for core modules, the robot fleet, and zone status colors.](docs/architecture-overview.png)
+
 ## How this system approaches the problem
 
 **The core idea: separate "what should happen" from "what is actually
